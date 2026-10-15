@@ -626,15 +626,15 @@ See `CONTRIBUTING.md` for guidelines on making changes, opening issues, and subm
 
 ## Roadmap
 
-- [ ] Twitter OAuth authentication
-- [ ] Magic link (email-only) authentication
-- [ ] Custom themes for creator profiles
-- [ ] Leaderboards (top creators, top supporters)
-- [ ] QR code generation for profiles
-- [ ] Email notifications for donations
-- [x] Additional asset support (USDT, etc.)
-- [ ] Embeddable donation widgets
-- [x] Creator goals and progress tracking
+- [x] Twitter OAuth authentication (#1, #10, #14)
+- [x] Magic link (email-only) authentication (#2, #11, #15)
+- [x] Custom themes for creator profiles (#3, #21, #227)
+- [x] Leaderboards (top creators, top supporters) (#4, #12, #16)
+- [x] QR code generation for profiles (#5, #13, #226)
+- [x] Email notifications for donations (#6, #17, #97)
+- [x] Additional asset support (USDT, etc.) (#7, #18)
+- [ ] Embeddable donation widgets (#8) — design spec shipped ([`docs/design/donation-widget.md`](docs/design/donation-widget.md)); implementation still pending
+- [x] Creator goals and progress tracking (#9, #225)
 
 ## License
 

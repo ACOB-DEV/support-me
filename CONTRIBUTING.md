@@ -1,22 +1,26 @@
 # Contributing to SupportMe
 
-Thank you for your interest in contributing to SupportMe. This project is built to support creator tipping and donations with a backend-first open source strategy.
+Thank you for your interest in contributing to SupportMe. This project is built to support creator tipping and donations across a Next.js frontend, an Express + Prisma backend, and Soroban smart contracts on Stellar.
 
 ## How to Contribute
 
 1. Fork the repository.
 2. Create a descriptive branch name, e.g. `feature/creator-dashboard` or `fix/api-validation`.
 3. Make small, focused changes.
-4. Add or update documentation when you add features.
-5. Commit with clear messages.
-6. Open a pull request with a summary and motivation.
+4. Add or update documentation when you add features — and tick the README Roadmap checklist when a roadmap item ships.
+5. Run the affected test suites (see [`TESTING.md`](TESTING.md)); CI runs the frontend, backend, and contract suites on every pull request.
+6. Commit with clear messages.
+7. Open a pull request with a summary and motivation.
 
 ## Repository Structure
 
-- `frontend/` — Next.js client for public pages and donation flows.
+- `frontend/` — Next.js client for public pages, the creator dashboard, and donation flows.
 - `backend/` — Express API with Prisma and PostgreSQL support.
-- `docs/` — Architecture, design, and contribution documentation.
-- `contracts/` — Legacy contract examples; not required for the current backend-first roadmap.
+- `contracts/` — Soroban smart contracts (`donation`, `creator-registry`) in a Cargo workspace. Deployed testnet addresses are listed in the README; contract tests run in CI on every pull request.
+- `anchor/` — Local SEP-24 test anchor for the fiat cash-out flow; see [`anchor/README.md`](anchor/README.md).
+- `docs/` — Architecture, API, authentication, security, and runbook documentation.
+- `docs/design/` — Handoff-ready UI/UX specs (donation widget, profile themes, empty states, …). New UI areas start here before implementation.
+- `TESTING.md` — What CI runs and how to run each suite locally.
 
 ## Development Setup
 
@@ -69,7 +73,7 @@ required environment variables, and curl walkthroughs.
 - Clean, well-documented APIs
 - Stable database schema and migrations
 - Accessible frontend flows
-- Minimal contract dependencies for now
+- A small, well-tested contract surface — new on-chain logic should be justified
 - Tests and validation for new features
 
 ## Best Practices
@@ -77,6 +81,8 @@ required environment variables, and curl walkthroughs.
 - Keep user flows simple and reliable.
 - Prefer explicit API responses and error handling.
 - Keep architecture documentation updated.
+- Keep the README Roadmap checklist accurate as features ship.
+- Design new UI areas (widgets, themes, …) in `docs/design/` before implementing them.
 - Avoid adding contract complexity unless it is required by the feature.
 
 ## Reporting Issues
