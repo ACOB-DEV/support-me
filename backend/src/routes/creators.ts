@@ -16,6 +16,7 @@ import {
 import { ConflictError, NotFoundError, UnauthorizedError } from "../errors/AppError";
 import { TtlCache } from "../services/ttlCache";
 import { toAmount } from "../lib/money";
+import { getCreatorStats } from "../services/creatorStats";
 
 const router = Router();
 
@@ -115,6 +116,25 @@ router.get(
     }
 
     return res.json(creator);
+  })
+);
+
+// Dashboard metrics for the signed-in creator (#224). Computed in the database
+// over all verified donations, not just the page the dashboard has loaded.
+router.get(
+  "/me/stats",
+  authMiddleware as any,
+  asyncHandler(async (req: AuthRequest, res) => {
+    if (!req.user) {
+      throw new UnauthorizedError("User not authenticated");
+    }
+
+    const creator = await prisma.creator.findUnique({ where: { userId: req.user.id } });
+    if (!creator) {
+      throw new NotFoundError("Creator not found");
+    }
+
+    return res.json(await getCreatorStats(creator.id));
   })
 );
 
