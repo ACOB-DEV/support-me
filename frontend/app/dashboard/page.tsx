@@ -16,6 +16,7 @@ import { TipChart } from '@/components/TipChart';
 import { ShareCard } from '@/components/ShareCard';
 import { ShareModal } from '@/components/ShareModal';
 import { QrCodeCard } from '@/components/QrCodeCard';
+import { DashboardStats, type CreatorStats } from '@/components/DashboardStats';
 import { usePrices } from '@/lib/usePrices';
 import { formatUsd } from '@/lib/prices';
 import { API_URL } from '@/lib/api';
@@ -66,6 +67,9 @@ export default function DashboardPage() {
   const [loadMoreError, setLoadMoreError] = useState<string | null>(null);
   const [infiniteScroll, setInfiniteScroll] = useState(true);
   const [error, setError] = useState('');
+  const [stats, setStats] = useState<CreatorStats | null>(null);
+  // Bumped on every live donation so the metrics are re-fetched from the API.
+  const [statsVersion, setStatsVersion] = useState(0);
   const [showShareCard, setShowShareCard] = useState(false);
   const [showShareModal, setShowShareModal] = useState(false);
   const seenDonationEventIds = useRef(new Set<string>());
@@ -226,6 +230,26 @@ export default function DashboardPage() {
 
   // Subscribe to the backend's SSE stream so newly confirmed on-chain
   // donations show up here live, without needing to refresh the page.
+  // Dashboard metrics (#224) are aggregated server-side over every verified
+  // donation, so they stay correct beyond the first page of history.
+  useEffect(() => {
+    if (!token || !creator) return;
+    let cancelled = false;
+    fetch(`${API_URL}/api/creators/me/stats`, {
+      headers: { Authorization: `Bearer ${token}` },
+    })
+      .then((res) => (res.ok ? res.json() : null))
+      .then((data) => {
+        if (!cancelled && data && Array.isArray(data.currencies)) setStats(data);
+      })
+      .catch(() => {
+        // Metrics are best-effort; the rest of the dashboard still works.
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [token, creator, statsVersion]);
+
   useEffect(() => {
     if (!creator?.walletAddress) return;
 
@@ -270,6 +294,7 @@ export default function DashboardPage() {
         return [newDonation, ...prev];
       });
       setTotalDonations((prev) => (prev !== null ? prev + 1 : null));
+      setStatsVersion((v) => v + 1);
 
       notify.success('New donation received!', {
         icon: <HugeiconsIcon icon={PartyIcon} size={18} strokeWidth={1.5} />,
@@ -372,6 +397,8 @@ export default function DashboardPage() {
             </div>
           ) : (
             <>
+              {stats && <DashboardStats stats={stats} prices={prices} />}
+
               {/* Volume by asset, plus lifetime cashed out */}
               <div className="grid md:grid-cols-3 gap-6 mb-8">
                 <div className="card-brutal bg-brand-cyan p-6">
