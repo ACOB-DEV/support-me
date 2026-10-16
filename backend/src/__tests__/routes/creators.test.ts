@@ -561,3 +561,63 @@ describe("GET /api/creators/leaderboard (#16)", () => {
     expect(mockedPrisma.donation.groupBy).not.toHaveBeenCalled();
   });
 });
+
+describe("GET /api/creators/me/stats (#224)", () => {
+  const token = generateToken(1, "GUSERADDRESS");
+
+  it("rejects requests without an auth token", async () => {
+    const res = await request(app).get("/api/creators/me/stats");
+    expect(res.status).toBe(401);
+  });
+
+  it("returns 404 when the authenticated user has no creator profile", async () => {
+    mockedPrisma.creator.findUnique.mockResolvedValue(null);
+
+    const res = await request(app)
+      .get("/api/creators/me/stats")
+      .set("Authorization", `Bearer ${token}`);
+
+    expect(res.status).toBe(404);
+  });
+
+  it("aggregates only the creator's verified donations", async () => {
+    mockedPrisma.creator.findUnique.mockResolvedValue({ id: 5, userId: 1, username: "bob" });
+    mockedPrisma.donation.groupBy
+      .mockResolvedValueOnce([
+        {
+          currency: "XLM",
+          _count: { _all: 2 },
+          _sum: { amount: new Prisma.Decimal("30") },
+          _avg: { amount: new Prisma.Decimal("15") },
+          _max: { amount: new Prisma.Decimal("25") },
+        },
+      ])
+      .mockResolvedValueOnce([
+        { currency: "XLM", senderAddress: "GA" },
+        { currency: "XLM", senderAddress: "GB" },
+      ]);
+
+    const res = await request(app)
+      .get("/api/creators/me/stats")
+      .set("Authorization", `Bearer ${token}`);
+
+    expect(res.status).toBe(200);
+    expect(res.body).toEqual({
+      donationCount: 2,
+      uniqueSupporters: 2,
+      currencies: [
+        {
+          currency: "XLM",
+          total: 30,
+          donationCount: 2,
+          uniqueSupporters: 2,
+          average: 15,
+          largest: 25,
+        },
+      ],
+    });
+    for (const call of mockedPrisma.donation.groupBy.mock.calls) {
+      expect(call[0].where).toEqual({ creatorId: 5, verified: true });
+    }
+  });
+});

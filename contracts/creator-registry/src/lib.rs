@@ -159,7 +159,7 @@ impl CreatorRegistryContract {
         let prop_id: u64 = env.storage().persistent().get(&PROPOSAL_COUNTER_KEY).unwrap_or(0);
         let timelock: u64 = env.storage().instance().get(&TIMELOCK_DELAY_KEY).unwrap_or(0);
         let now = env.ledger().timestamp();
-        let eta = now + timelock;
+        let eta = now.checked_add(timelock).expect("proposal eta overflow");
 
         let proposal = AdminProposal {
             id: prop_id,
@@ -173,7 +173,10 @@ impl CreatorRegistryContract {
 
         env.storage().persistent().set(&(PROPOSAL_KEY, prop_id), &proposal);
         env.storage().persistent().set(&(APPROVAL_KEY, prop_id, proposer.clone()), &true);
-        env.storage().persistent().set(&PROPOSAL_COUNTER_KEY, &(prop_id + 1));
+        env.storage().persistent().set(
+            &PROPOSAL_COUNTER_KEY,
+            &prop_id.checked_add(1).expect("proposal counter overflow"),
+        );
 
         ProposalCreatedEvent {
             proposal_id: prop_id,
@@ -205,7 +208,10 @@ impl CreatorRegistryContract {
         assert!(!has_approved, "admin has already approved this proposal");
 
         env.storage().persistent().set(&(APPROVAL_KEY, proposal_id, admin.clone()), &true);
-        proposal.approvals_count += 1;
+        proposal.approvals_count = proposal
+            .approvals_count
+            .checked_add(1)
+            .expect("approvals count overflow");
         env.storage().persistent().set(&(PROPOSAL_KEY, proposal_id), &proposal);
 
         ProposalApprovedEvent {
@@ -372,8 +378,14 @@ impl CreatorRegistryContract {
                 created_at: env.ledger().timestamp(),
             });
 
-        profile.total_donations += amount;
-        profile.donation_count += 1;
+        profile.total_donations = profile
+            .total_donations
+            .checked_add(amount)
+            .expect("total donations overflow");
+        profile.donation_count = profile
+            .donation_count
+            .checked_add(1)
+            .expect("donation count overflow");
 
         env.storage().persistent().set(&creator, &profile);
 
@@ -575,5 +587,22 @@ mod tests {
         let fetched = client.get_creator(&creator).unwrap();
         assert_eq!(fetched.username, String::from_bytes(&env, b"late_dev"));
         assert_eq!(fetched.total_donations, 1000);
+    }
+
+    #[test]
+    #[should_panic(expected = "total donations overflow")]
+    fn test_record_donation_total_overflow_panics() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let contract_id = env.register(CreatorRegistryContract, ());
+        let client = CreatorRegistryContractClient::new(&env, &contract_id);
+
+        let admin = Address::generate(&env);
+        let donation_contract = Address::generate(&env);
+        let creator = Address::generate(&env);
+
+        client.initialize(&admin, &donation_contract);
+        client.record_donation(&donation_contract, &creator, &i128::MAX);
+        client.record_donation(&donation_contract, &creator, &1);
     }
 }

@@ -235,7 +235,7 @@ impl DonationContract {
         let prop_id: u64 = env.storage().persistent().get(&PROPOSAL_COUNTER_KEY).unwrap_or(0);
         let timelock: u64 = env.storage().instance().get(&TIMELOCK_DELAY_KEY).unwrap_or(0);
         let now = env.ledger().timestamp();
-        let eta = now + timelock;
+        let eta = now.checked_add(timelock).expect("proposal eta overflow");
 
         let proposal = AdminProposal {
             id: prop_id,
@@ -249,7 +249,10 @@ impl DonationContract {
 
         env.storage().persistent().set(&(PROPOSAL_KEY, prop_id), &proposal);
         env.storage().persistent().set(&(APPROVAL_KEY, prop_id, proposer.clone()), &true);
-        env.storage().persistent().set(&PROPOSAL_COUNTER_KEY, &(prop_id + 1));
+        env.storage().persistent().set(
+            &PROPOSAL_COUNTER_KEY,
+            &prop_id.checked_add(1).expect("proposal counter overflow"),
+        );
 
         ProposalCreatedEvent {
             proposal_id: prop_id,
@@ -281,7 +284,10 @@ impl DonationContract {
         assert!(!has_approved, "admin has already approved this proposal");
 
         env.storage().persistent().set(&(APPROVAL_KEY, proposal_id, admin.clone()), &true);
-        proposal.approvals_count += 1;
+        proposal.approvals_count = proposal
+            .approvals_count
+            .checked_add(1)
+            .expect("approvals count overflow");
         env.storage().persistent().set(&(PROPOSAL_KEY, proposal_id), &proposal);
 
         ProposalApprovedEvent {
@@ -526,7 +532,10 @@ impl DonationContract {
             .set(&(DONATIONS_KEY, counter), &donation);
         env.storage()
             .persistent()
-            .set(&DONATION_COUNTER, &(counter + 1));
+            .set(
+                &DONATION_COUNTER,
+                &counter.checked_add(1).expect("donation counter overflow"),
+            );
 
         DonatedEvent {
             donor,
@@ -561,6 +570,9 @@ impl DonationContract {
 
         let id: u64 = env.storage().persistent().get(&SUB_COUNTER).unwrap_or(0);
         let now = env.ledger().timestamp();
+        let next_charge_at = now
+            .checked_add(interval_secs)
+            .expect("next charge time overflow");
 
         let subscription = Subscription {
             supporter: supporter.clone(),
@@ -568,14 +580,17 @@ impl DonationContract {
             token: token.clone(),
             amount,
             interval_secs,
-            next_charge_at: now + interval_secs,
+            next_charge_at,
             active: true,
         };
 
         env.storage()
             .persistent()
             .set(&(SUBSCRIPTIONS_KEY, id), &subscription);
-        env.storage().persistent().set(&SUB_COUNTER, &(id + 1));
+        env.storage().persistent().set(
+            &SUB_COUNTER,
+            &id.checked_add(1).expect("subscription counter overflow"),
+        );
 
         SubscribedEvent {
             supporter,
@@ -584,7 +599,7 @@ impl DonationContract {
             token,
             amount,
             interval_secs,
-            next_charge_at: now + interval_secs,
+            next_charge_at,
         }
         .publish(&env);
 
@@ -644,6 +659,16 @@ impl DonationContract {
             return Err(ChargeError::InsufficientBalance);
         }
 
+        // Effects before interactions: finalize the reschedule before calling
+        // into the token contract, so nothing the token does during
+        // `transfer_from` can observe or act on a stale `next_charge_at`.
+        subscription.next_charge_at = now
+            .checked_add(subscription.interval_secs)
+            .expect("next charge time overflow");
+        env.storage()
+            .persistent()
+            .set(&(SUBSCRIPTIONS_KEY, subscription_id), &subscription);
+
         // Draw on the allowance: this contract is the `spender`, authorized
         // implicitly since it is the direct invoker (same trick used below
         // to call the registry as our own contract identity).
@@ -684,12 +709,10 @@ impl DonationContract {
             .set(&(DONATIONS_KEY, counter), &donation);
         env.storage()
             .persistent()
-            .set(&DONATION_COUNTER, &(counter + 1));
-
-        subscription.next_charge_at = now + subscription.interval_secs;
-        env.storage()
-            .persistent()
-            .set(&(SUBSCRIPTIONS_KEY, subscription_id), &subscription);
+            .set(
+                &DONATION_COUNTER,
+                &counter.checked_add(1).expect("donation counter overflow"),
+            );
 
         DonatedEvent {
             donor: subscription.supporter.clone(),
@@ -816,6 +839,8 @@ impl DonationContract {
 
 #[cfg(test)]
 mod tests {
+    extern crate std;
+
     use super::*;
     use creator_registry::{CreatorRegistryContract, CreatorRegistryContractClient};
     use soroban_sdk::testutils::{Address as _, Ledger};
@@ -1615,7 +1640,10 @@ mod tests {
     #[test]
     fn property_test_unauthorized_callers_cannot_modify_config() {
         let env = Env::default();
+        env.mock_all_auths_allowing_non_root_auth();
         let (_admin, donation_client, _registry_client) = setup(&env);
+        // Drop the mocked auths so the privileged calls below run unauthorized.
+        env.set_auths(&[]);
 
         let _unauthorized_caller = Address::generate(&env);
         let random_token = Address::generate(&env);
@@ -1631,7 +1659,7 @@ mod tests {
         })).is_err());
 
         assert!(std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-            donation_client.set_paused(&true);
+            donation_client.emergency_pause(&_unauthorized_caller);
         })).is_err());
     }
 
@@ -1789,6 +1817,80 @@ mod tests {
             let premature_charge = donation_client.try_charge_subscription(&executor, &sub_id);
             prop_assert!(premature_charge.is_err());
         }
+    }
+
+    #[test]
+    #[should_panic(expected = "next charge time overflow")]
+    fn test_subscribe_interval_overflow_panics() {
+        let env = Env::default();
+        env.mock_all_auths_allowing_non_root_auth();
+        let (admin, donation_client, _registry_client) = setup(&env);
+
+        let supporter = Address::generate(&env);
+        let creator = Address::generate(&env);
+        let token_address = create_token_contract(&env, &admin);
+        donation_client.add_allowed_token(&token_address);
+
+        env.ledger().with_mut(|li| li.timestamp = 1_000);
+        donation_client.subscribe(&supporter, &creator, &token_address, &100, &u64::MAX);
+    }
+
+    #[test]
+    fn test_charge_subscription_persists_reschedule_with_the_charge() {
+        let env = Env::default();
+        env.mock_all_auths_allowing_non_root_auth();
+        let (admin, donation_client, _registry_client) = setup(&env);
+
+        let supporter = Address::generate(&env);
+        let creator = Address::generate(&env);
+        let executor = Address::generate(&env);
+        let token_address = create_token_contract(&env, &admin);
+        donation_client.add_allowed_token(&token_address);
+        StellarAssetClient::new(&env, &token_address).mint(&supporter, &10_000);
+        donation_client.register_creator(&creator, &String::from_bytes(&env, b"dev"));
+
+        env.ledger().with_mut(|li| li.timestamp = 1_000);
+        donation_client.set_executor(&executor);
+        let id = donation_client.subscribe(&supporter, &creator, &token_address, &500, &1_000);
+        let token_client = token::Client::new(&env, &token_address);
+        token_client.approve(&supporter, &donation_client.address, &5_000, &1_000);
+
+        env.ledger().with_mut(|li| li.timestamp = 2_500);
+        donation_client.charge_subscription(&executor, &id);
+
+        // The reschedule and the transfer land together.
+        assert_eq!(donation_client.get_subscription(&id).unwrap().next_charge_at, 3_500);
+        assert_eq!(token_client.balance(&creator), 500);
+
+        // A second charge in the same period is rejected because the new
+        // schedule was already persisted.
+        assert!(donation_client.try_charge_subscription(&executor, &id).is_err());
+        assert_eq!(token_client.balance(&creator), 500);
+    }
+
+    #[test]
+    fn test_failed_charge_does_not_reschedule() {
+        let env = Env::default();
+        env.mock_all_auths_allowing_non_root_auth();
+        let (admin, donation_client, _registry_client) = setup(&env);
+
+        let supporter = Address::generate(&env);
+        let creator = Address::generate(&env);
+        let executor = Address::generate(&env);
+        let token_address = create_token_contract(&env, &admin);
+        donation_client.add_allowed_token(&token_address);
+        StellarAssetClient::new(&env, &token_address).mint(&supporter, &100);
+
+        env.ledger().with_mut(|li| li.timestamp = 1_000);
+        donation_client.set_executor(&executor);
+        let id = donation_client.subscribe(&supporter, &creator, &token_address, &500, &1_000);
+        let token_client = token::Client::new(&env, &token_address);
+        token_client.approve(&supporter, &donation_client.address, &5_000, &1_000);
+
+        env.ledger().with_mut(|li| li.timestamp = 2_000);
+        let result = donation_client.try_charge_subscription(&executor, &id);
+        assert_eq!(result.unwrap_err().unwrap(), ChargeError::InsufficientBalance);
+        assert_eq!(donation_client.get_subscription(&id).unwrap().next_charge_at, 2_000);
     }
 }
 
