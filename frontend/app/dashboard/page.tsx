@@ -449,7 +449,14 @@ export default function DashboardPage() {
           {/* Recent Activity — tips received and cash-outs, newest first */}
           <div className="card-brutal p-4 sm:p-6 overflow-x-auto">
             <div className="flex items-center justify-between gap-3 mb-4">
-              <h2 className="text-lg font-extrabold text-ink">Recent Activity</h2>
+              <div className="flex items-center gap-2">
+                <h2 className="text-lg font-extrabold text-ink">Recent Activity</h2>
+                {totalDonations !== null && (
+                  <span className="text-xs font-bold px-2 py-0.5 rounded-full bg-brand-light-purple/40 border border-ink/20 text-ink">
+                    {donations.length} of {totalDonations} tips
+                  </span>
+                )}
+              </div>
               <button
                 type="button"
                 onClick={exportDonationsCsv}
@@ -528,6 +535,14 @@ export default function DashboardPage() {
                       <span className="text-xs font-bold text-ink uppercase tracking-wide whitespace-nowrap">
                         Withdraw
                       </span>
+                      {withdrawal.anchorTxId && (
+                        <span
+                          className="text-[11px] font-mono text-muted/80 truncate max-w-[120px] hidden sm:inline"
+                          title={`Ref: ${withdrawal.anchorTxId}`}
+                        >
+                          {withdrawal.anchorTxId}
+                        </span>
+                      )}
                       <span className="text-xs text-muted whitespace-nowrap ml-auto pl-2">
                         {new Date(withdrawal.createdAt).toLocaleDateString(undefined, {
                           month: 'short',

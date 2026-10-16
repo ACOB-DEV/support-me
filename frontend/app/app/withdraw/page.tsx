@@ -1,17 +1,19 @@
 'use client';
 
 import { useState, useEffect } from 'react';
+import Link from 'next/link';
 import * as StellarSdk from '@stellar/stellar-sdk';
 import { useAuth } from '@/context/AuthContext';
+import { useCreator } from '@/context/CreatorContext';
 import { ProtectedRoute } from '@/components/ProtectedRoute';
 import { AppNav } from '@/components/AppNav';
 import { Skeleton } from '@/components/Skeleton';
 import { notify } from '@/lib/notify';
 import { useNgnRate } from '@/lib/useNgnRate';
+import { API_URL } from '@/lib/api';
 
 const HORIZON_URL = 'https://horizon-testnet.stellar.org';
 const server = new StellarSdk.Horizon.Server(HORIZON_URL);
-const USDC_ISSUER = process.env.NEXT_PUBLIC_USDC_ISSUER;
 
 const NIGERIAN_BANKS = [
   'Access Bank', 'GTBank', 'Kuda', 'Opay', 'UBA', 'Zenith Bank',
@@ -21,7 +23,8 @@ const NIGERIAN_BANKS = [
 type Stage = 'form' | 'processing' | 'done';
 
 export default function WithdrawPage() {
-  const { user } = useAuth();
+  const { user, token } = useAuth();
+  const { creator, loading: creatorLoading } = useCreator();
   const walletAddress = user?.walletAddress || '';
   const ngnRate = useNgnRate();
 
@@ -46,12 +49,11 @@ export default function WithdrawPage() {
         const native = account.balances.find((b) => b.asset_type === 'native');
         setXlmBalance(native ? Math.round(parseFloat((native as any).balance)).toString() : '0');
 
-        if (USDC_ISSUER) {
-          const usdc = account.balances.find(
-            (b) => (b as any).asset_code === 'USDC' && (b as any).asset_issuer === USDC_ISSUER
-          );
-          setUsdcBalance(usdc ? Math.round(parseFloat((usdc as any).balance)).toString() : null);
-        }
+        const usdcIssuer = process.env.NEXT_PUBLIC_USDC_ISSUER;
+        const usdc = account.balances.find(
+          (b) => (b as any).asset_code === 'USDC' && (!usdcIssuer || (b as any).asset_issuer === usdcIssuer)
+        );
+        setUsdcBalance(usdc ? Math.round(parseFloat((usdc as any).balance)).toString() : null);
       })
       .catch(() =>
         notify.error(
@@ -106,7 +108,7 @@ export default function WithdrawPage() {
     }
   };
 
-  function submit(e: React.FormEvent) {
+  async function submit(e: React.FormEvent) {
     e.preventDefault();
     setError(null);
     const n = Number(amount);
@@ -115,12 +117,52 @@ export default function WithdrawPage() {
     if (!/^\d{10}$/.test(accountNo)) { setError('Enter a valid 10-digit account number.'); return; }
     if (!bank) { setError('Select your bank.'); return; }
     if (!accountName && !verifying) { setError('Please verify your account number first.'); return; }
+
+    // Ensure we have a creator profile and an auth token before calling the API
+    if (!creator) {
+      setError('You need a creator profile to withdraw. Create one in settings.');
+      return;
+    }
+    if (!token) {
+      setError('Not authenticated. Please sign in again.');
+      return;
+    }
+
     setStage('processing');
-    setTimeout(() => {
-      setRef(`PL-${Date.now().toString(36).toUpperCase()}`);
+
+    const anchorTxId = `PL-${Date.now().toString(36).toUpperCase()}`;
+
+    try {
+      const res = await fetch(`${API_URL}/api/withdrawals`, {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          'Authorization': `Bearer ${token}`,
+        },
+        body: JSON.stringify({
+          creatorUsername: creator.username,
+          amountIn: n,
+          amountOut: naira || undefined,
+          fee: 0,
+          currency: 'USDC',
+          anchorTxId,
+          status: 'completed',
+        }),
+      });
+
+      if (!res.ok) {
+        const body = await res.json().catch(() => ({}));
+        throw new Error(body.error || `Server responded ${res.status}`);
+      }
+
+      const withdrawal = await res.json();
+      setRef(withdrawal.anchorTxId || anchorTxId);
       setStage('done');
-      notify.success('Withdrawal initiated');
-    }, 2200);
+      notify.success('Withdrawal recorded (demo)');
+    } catch (err) {
+      setError((err as Error).message || 'Could not record withdrawal');
+      setStage('form');
+    }
   }
 
   return (
@@ -129,11 +171,42 @@ export default function WithdrawPage() {
         <AppNav />
         <div className="max-w-lg mx-auto px-4 sm:px-6 py-10 space-y-6">
           <div>
-            <h1 className="text-2xl sm:text-3xl font-extrabold text-ink tracking-tight">Withdraw to Naira</h1>
+            <div className="flex items-center gap-2">
+              <h1 className="text-2xl sm:text-3xl font-extrabold text-ink tracking-tight">Withdraw to Naira</h1>
+              <span className="text-xs px-2 py-0.5 rounded-md bg-brand-lime border border-ink/30 font-bold text-ink">
+                Demo
+              </span>
+            </div>
             <p className="mt-1 text-sm text-muted font-medium">
               Convert your USDC to NGN and send it to your bank account.
             </p>
           </div>
+
+          {/* Demo disclaimer: placed prominently above the fold before the form */}
+          <div className="card-brutal bg-brand-lime/40 border-2 border-ink p-4 text-sm font-medium text-ink">
+            <div className="flex items-center gap-2 mb-1">
+              <span className="px-2 py-0.5 rounded bg-brand-lime border border-ink text-xs font-black uppercase tracking-wider">
+                Demo mode
+              </span>
+              <span className="font-extrabold text-ink">Simulated off-ramp</span>
+            </div>
+            <p>
+              This simulates a licensed bank off-ramp on testnet. No real bank transfer occurs and no on-chain funds move.
+              The resulting withdrawal record is persisted to your account history so it appears in your Activity and exports.
+            </p>
+          </div>
+
+          {!creator && !creatorLoading && (
+            <div className="card-brutal bg-amber-500/20 border-2 border-ink p-4 text-sm font-medium text-ink">
+              <p className="font-bold">Creator profile required</p>
+              <p className="mt-1 text-xs text-muted">
+                You must have a creator profile before recording withdrawals so they can be associated with your account.
+              </p>
+              <Link href="/settings" className="btn-brutal btn-brutal-white mt-3 inline-block text-xs py-1.5 px-3">
+                Go to Settings
+              </Link>
+            </div>
+          )}
 
           <div className="card-brutal bg-brand-cyan p-4 sm:p-5">
             <p className="text-xs font-bold text-ink/70 uppercase tracking-wide mb-2">Your balances</p>
@@ -151,29 +224,36 @@ export default function WithdrawPage() {
             )}
           </div>
 
-          <div className="card-brutal bg-brand-lime/30 p-4 text-sm font-medium text-ink">
-            Demo mode, this simulates a licensed off-ramp. No real bank transfer occurs and no on-chain funds move.
-          </div>
-
           {stage === 'done' ? (
             <div className="card-brutal p-6 sm:p-8 text-center space-y-4">
               <div className="mx-auto grid h-14 w-14 place-items-center rounded-full bg-emerald-500/15 text-3xl">✓</div>
               <div>
-                <p className="text-xl font-extrabold text-ink">Withdrawal initiated</p>
+                <p className="text-xl font-extrabold text-ink">Withdrawal recorded (Demo)</p>
                 <p className="mt-1 text-sm text-muted font-medium">
-                  ₦{naira.toLocaleString()} is on its way to your {bank} account ending {accountNo.slice(-4)}.
+                  ₦{naira.toLocaleString()} simulated transfer to your {bank} account ending {accountNo.slice(-4)}.
+                </p>
+                <p className="mt-1 text-xs text-muted">
+                  This transaction has been persisted to your withdrawal history.
                 </p>
               </div>
               <div className="rounded-xl bg-background border-2 border-ink/10 p-3 text-sm">
                 <span className="text-muted font-medium">Reference</span>{' '}
                 <span className="font-mono font-bold">{ref}</span>
               </div>
-              <button
-                className="btn-brutal btn-brutal-white w-full"
-                onClick={() => { setStage('form'); setAmount(''); setAccountNo(''); setBank(''); }}
-              >
-                Make another withdrawal
-              </button>
+              <div className="flex flex-col sm:flex-row gap-3">
+                <Link
+                  href="/dashboard"
+                  className="btn-brutal btn-brutal-primary flex-1 text-center"
+                >
+                  View in Dashboard
+                </Link>
+                <button
+                  className="btn-brutal btn-brutal-white flex-1"
+                  onClick={() => { setStage('form'); setAmount(''); setAccountNo(''); setBank(''); setAccountName(null); setRef(''); }}
+                >
+                  Make another withdrawal
+                </button>
+              </div>
             </div>
           ) : (
             <form onSubmit={submit} className="card-brutal p-6 space-y-4">
@@ -256,12 +336,16 @@ export default function WithdrawPage() {
                 <div className="card-brutal bg-brand-pink p-3 text-sm font-bold text-ink">{error}</div>
               )}
 
+              <p className="text-xs text-muted text-center font-medium">
+                Simulated withdrawal — records a demo cash-out to your activity history.
+              </p>
+
               <button
                 type="submit"
-                disabled={stage === 'processing'}
+                disabled={stage === 'processing' || (!creator && !creatorLoading)}
                 className="btn-brutal btn-brutal-primary w-full"
               >
-                {stage === 'processing' ? 'Processing…' : 'Withdraw to bank'}
+                {stage === 'processing' ? 'Processing…' : 'Simulate withdrawal'}
               </button>
             </form>
           )}
