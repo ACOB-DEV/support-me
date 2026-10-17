@@ -28,7 +28,7 @@ import { useAuth } from '@/context/AuthContext';
 import { Skeleton } from '@/components/Skeleton';
 import { TipJarLoader } from '@/components/TipJarLoader';
 import { LanguageSwitcher } from '@/components/LanguageSwitcher';
-import { getMessages, useLocalePreference } from '@/lib/i18n';
+import { getMessages, useDocumentLang, useLocalePreference, type Locale } from '@/lib/i18n';
 import { THEME_LAYOUTS, themeStyle, type ProfileTheme } from '@/lib/theme';
 
 
@@ -71,13 +71,25 @@ interface Goal {
   recurring: boolean;
 }
 
-export default function CreatorProfileClient({ params }: { params: Promise<{ username: string }> }) {
+export default function CreatorProfileClient({
+  params,
+  initialLocale,
+}: {
+  params: Promise<{ username: string }>;
+  /** Locale from the `supportme_locale` cookie, read server-side by page.tsx. */
+  initialLocale?: Locale;
+}) {
   const { username } = use(params);
-  const [locale, setLocale] = useLocalePreference();
+  const [locale, setLocale] = useLocalePreference(initialLocale);
+  useDocumentLang(locale);
 
   return (
     <NextIntlClientProvider locale={locale} messages={getMessages(locale)}>
-      <CreatorProfileView username={username} locale={locale} onLocaleChange={setLocale} />
+      {/* lang on the translated region too, so it is correct on first paint
+          even before useDocumentLang's effect updates <html lang>. */}
+      <div lang={locale}>
+        <CreatorProfileView username={username} locale={locale} onLocaleChange={setLocale} />
+      </div>
     </NextIntlClientProvider>
   );
 }
@@ -494,7 +506,7 @@ function CreatorProfileView({ username, locale, onLocaleChange }: CreatorProfile
 
   if (loading) {
     return (
-      <div className="min-h-screen bg-background py-10 px-4">
+      <div className="min-h-screen bg-background py-10 px-4" aria-busy="true">
         <div className="max-w-md mx-auto">
           <div className="card-brutal p-8 text-center">
             <Skeleton className="h-24 w-24 rounded-full mx-auto mb-4" />
@@ -685,7 +697,7 @@ function CreatorProfileView({ username, locale, onLocaleChange }: CreatorProfile
             <div className="py-2">
               <TipJarLoader fullScreen={false} />
               {(subscribeStep || (txStatus && statusLabels[txStatus])) && (
-                <p className="text-sm text-ink text-center animate-pulse font-bold mt-2">
+                <p className="text-sm text-ink text-center motion-safe:animate-pulse font-bold mt-2">
                   {subscribeStep ?? statusLabels[txStatus as string]}
                 </p>
               )}

@@ -7,7 +7,7 @@ export interface ActivitySkeletonProps {
 
 export function ActivitySkeleton({ showNav = true }: ActivitySkeletonProps) {
   return (
-    <div className="min-h-screen bg-background" data-testid="activity-skeleton">
+    <div className="min-h-screen bg-background" data-testid="activity-skeleton" aria-busy="true">
       {showNav && <AppNav />}
       <div className="max-w-6xl mx-auto px-4 sm:px-6 lg:px-8 py-10">
         <Skeleton className="h-10 w-44 mb-8" />

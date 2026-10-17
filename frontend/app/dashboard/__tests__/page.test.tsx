@@ -217,7 +217,7 @@ describe('DashboardPage', () => {
 
     const { container } = render(<DashboardPage />);
 
-    expect(container.querySelectorAll('.animate-pulse').length).toBeGreaterThan(0);
+    expect(container.querySelectorAll('.motion-safe\\:animate-pulse').length).toBeGreaterThan(0);
   });
 
   it('renders volume split and recent donations once data has loaded', async () => {

@@ -1,6 +1,8 @@
 import type { Metadata } from 'next';
+import { cookies } from 'next/headers';
 import CreatorProfileClient from './CreatorProfileClient';
 import { fetchCreatorSummary } from './creator-summary';
+import { DEFAULT_LOCALE, LOCALE_COOKIE_NAME, isSupportedLocale, type Locale } from '@/lib/locale';
 
 type ParamsPromise = Promise<{ username: string }>;
 
@@ -57,18 +59,30 @@ export async function generateMetadata({ params }: { params: ParamsPromise }): P
 export default async function CreatorProfilePage({ params }: { params: ParamsPromise }) {
   const { username } = await params;
   const creator = await fetchCreatorSummary(username);
+  const locale = await readLocaleCookie();
 
   return (
     <>
+      {locale !== DEFAULT_LOCALE && (
+        // app/layout.tsx renders <html lang="en">. Patch it while the HTML is
+        // still being parsed so the first paint already has the reader's
+        // language; CreatorProfileClient keeps it in sync after hydration.
+        <script dangerouslySetInnerHTML={{ __html: `document.documentElement.lang=${JSON.stringify(locale)};` }} />
+      )}
       {creator && (
         <script
           type="application/ld+json"
           dangerouslySetInnerHTML={{ __html: JSON.stringify(buildCreatorJsonLd(creator)) }}
         />
       )}
-      <CreatorProfileClient params={params} />
+      <CreatorProfileClient params={params} initialLocale={locale} />
     </>
   );
+}
+
+async function readLocaleCookie(): Promise<Locale> {
+  const value = (await cookies()).get(LOCALE_COOKIE_NAME)?.value;
+  return isSupportedLocale(value) ? value : DEFAULT_LOCALE;
 }
 
 function buildCreatorJsonLd(creator: NonNullable<Awaited<ReturnType<typeof fetchCreatorSummary>>>) {

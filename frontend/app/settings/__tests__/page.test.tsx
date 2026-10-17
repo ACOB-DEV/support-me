@@ -1,5 +1,5 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
-import { render, screen, waitFor } from '@testing-library/react';
+import { render, screen, waitFor, within } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import SettingsPage from '@/app/settings/page';
 import { useAuth } from '@/context/AuthContext';
@@ -226,12 +226,12 @@ describe('SettingsPage', () => {
     });
   });
 
-  it('deletes a goal via DELETE after confirmation and removes it from the list', async () => {
+  it('deletes a goal via DELETE after confirming in the dialog and removes it from the list', async () => {
     mockFetchRoutes({
       '/api/creators/me': { body: baseCreator },
       '/api/goals/bob': { body: { items: [goal({ id: 7, title: 'Old goal' })] } },
     });
-    const confirmSpy = vi.spyOn(window, 'confirm').mockReturnValue(true);
+    const confirmSpy = vi.spyOn(window, 'confirm');
     const user = userEvent.setup();
 
     render(<SettingsPage />);
@@ -239,34 +239,45 @@ describe('SettingsPage', () => {
 
     await user.click(screen.getByRole('button', { name: 'Delete' }));
 
+    const dialog = screen.getByRole('alertdialog', { name: 'Delete "Old goal"?' });
+    // The body shows the goal's progress so the creator knows what they're losing.
+    expect(within(dialog).getByText('120 / 500 XLM raised (24%)')).toBeInTheDocument();
+    expect(within(dialog).getByRole('button', { name: 'Cancel' })).toHaveFocus();
+
+    await user.click(within(dialog).getByRole('button', { name: 'Delete goal' }));
+
     await waitFor(() => expect(screen.queryByText('Old goal')).not.toBeInTheDocument());
+    expect(screen.queryByRole('alertdialog')).not.toBeInTheDocument();
     const deleted = (global.fetch as ReturnType<typeof vi.fn>).mock.calls.some((call) => {
       const [url, init] = call as [string, RequestInit];
       return url.includes('/api/goals/7') && init?.method === 'DELETE';
     });
     expect(deleted).toBe(true);
+    expect(confirmSpy).not.toHaveBeenCalled();
     confirmSpy.mockRestore();
   });
 
-  it('keeps a goal when deletion is not confirmed', async () => {
+  it('keeps a goal when deletion is cancelled', async () => {
     mockFetchRoutes({
       '/api/creators/me': { body: baseCreator },
       '/api/goals/bob': { body: { items: [goal({ id: 7, title: 'Old goal' })] } },
     });
-    const confirmSpy = vi.spyOn(window, 'confirm').mockReturnValue(false);
     const user = userEvent.setup();
 
     render(<SettingsPage />);
     await waitFor(() => expect(screen.getByText('Old goal')).toBeInTheDocument());
 
-    await user.click(screen.getByRole('button', { name: 'Delete' }));
+    const trigger = screen.getByRole('button', { name: 'Delete' });
+    await user.click(trigger);
+    await user.click(screen.getByRole('button', { name: 'Cancel' }));
 
+    expect(screen.queryByRole('alertdialog')).not.toBeInTheDocument();
     expect(screen.getByText('Old goal')).toBeInTheDocument();
+    expect(trigger).toHaveFocus();
     const deleted = (global.fetch as ReturnType<typeof vi.fn>).mock.calls.some(
       (call) => (call[1] as RequestInit | undefined)?.method === 'DELETE'
     );
     expect(deleted).toBe(false);
-    confirmSpy.mockRestore();
   });
 
   it('blocks saving when every payment method is disabled', async () => {

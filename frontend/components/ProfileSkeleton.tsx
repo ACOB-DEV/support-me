@@ -2,7 +2,7 @@ import { Skeleton } from '@/components/Skeleton';
 
 export function ProfileSkeleton() {
   return (
-    <div className="min-h-screen bg-background py-10 px-4" data-testid="profile-skeleton">
+    <div className="min-h-screen bg-background py-10 px-4" data-testid="profile-skeleton" aria-busy="true">
       <div className="max-w-md mx-auto space-y-6">
         {/* Creator header */}
         <div className="card-brutal p-8 text-center">

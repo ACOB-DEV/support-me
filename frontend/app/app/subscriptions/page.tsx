@@ -8,6 +8,7 @@ import { ProtectedRoute } from '@/components/ProtectedRoute';
 import { AppNav } from '@/components/AppNav';
 import { Skeleton } from '@/components/Skeleton';
 import { cancelSubscription } from '@/lib/contract';
+import { ConfirmDialog } from '@/components/ConfirmDialog';
 import { API_URL } from '@/lib/api';
 import { fetchWithRetry, isNetworkError } from '@/lib/network';
 import { describeChargeFailure } from '@/lib/failures';
@@ -40,6 +41,7 @@ function SubscriptionsList() {
   const [subscriptions, setSubscriptions] = useState<Subscription[]>([]);
   const [loading, setLoading] = useState(true);
   const [cancellingId, setCancellingId] = useState<number | null>(null);
+  const [subscriptionToCancel, setSubscriptionToCancel] = useState<Subscription | null>(null);
 
   useEffect(() => {
     if (!user?.walletAddress) return;
@@ -144,7 +146,7 @@ function SubscriptionsList() {
 
                 {subscription.active && (
                   <button
-                    onClick={() => handleCancel(subscription)}
+                    onClick={() => setSubscriptionToCancel(subscription)}
                     disabled={cancellingId === subscription.id}
                     className="text-sm font-bold text-ink/60 hover:text-ink underline underline-offset-2 shrink-0"
                   >
@@ -156,6 +158,27 @@ function SubscriptionsList() {
           </div>
         )}
       </div>
+
+      <ConfirmDialog
+        open={subscriptionToCancel !== null}
+        title={`Cancel your donation to ${
+          subscriptionToCancel?.creator.displayName || subscriptionToCancel?.creator.username
+        }?`}
+        description={
+          subscriptionToCancel &&
+          `You'll stop sending ${subscriptionToCancel.amount} ${subscriptionToCancel.token} ${formatInterval(
+            subscriptionToCancel.intervalSecs
+          )}. Your wallet will ask you to sign the cancellation.`
+        }
+        confirmLabel="Cancel donation"
+        cancelLabel="Keep it"
+        onConfirm={() => {
+          const subscription = subscriptionToCancel;
+          setSubscriptionToCancel(null);
+          if (subscription) handleCancel(subscription);
+        }}
+        onCancel={() => setSubscriptionToCancel(null)}
+      />
     </div>
   );
 }

@@ -64,7 +64,7 @@ describe('ActivityPage', () => {
 
     const { container } = render(<ActivityPage />);
 
-    expect(container.querySelectorAll('.animate-pulse').length).toBeGreaterThan(0);
+    expect(container.querySelectorAll('.motion-safe\\:animate-pulse').length).toBeGreaterThan(0);
   });
 
   it('shows a friendly empty state with a CTA when nothing has happened yet', async () => {
