@@ -27,7 +27,10 @@ jest.mock("../../services/donationNotifications", () => ({
 
 import prisma from "../../prisma";
 import { SubscriptionExecutor } from "../../services/subscriptionExecutor";
-import { notifySubscriptionRenewed } from "../../services/subscriptionNotifications";
+import {
+  notifySubscriptionPaymentFailed,
+  notifySubscriptionRenewed,
+} from "../../services/subscriptionNotifications";
 import { applyDonationToGoals } from "../../services/goalService";
 import { notifyGoalsReached } from "../../services/donationNotifications";
 
@@ -37,6 +40,7 @@ const mockedPrisma = prisma as unknown as {
   $transaction: jest.Mock;
 };
 const mockedRenewed = notifySubscriptionRenewed as jest.Mock;
+const mockedPaymentFailed = notifySubscriptionPaymentFailed as jest.Mock;
 const mockedApplyToGoals = applyDonationToGoals as jest.Mock;
 const mockedNotifyGoalsReached = notifyGoalsReached as jest.Mock;
 
@@ -110,5 +114,53 @@ describe("SubscriptionExecutor donation indexing", () => {
 
     expect(mockedApplyToGoals).toHaveBeenCalledWith(mockedPrisma, 7, "XLM", 2.5);
     expect(mockedNotifyGoalsReached).toHaveBeenCalledWith([reachedGoal]);
+  });
+});
+
+describe("SubscriptionExecutor executor-side failures (#279)", () => {
+  beforeEach(() => {
+    jest.clearAllMocks();
+    mockedPrisma.subscription.update.mockResolvedValue(subscription);
+    mockedPaymentFailed.mockResolvedValue(true);
+  });
+
+  it("does not penalize the subscriber when the executor account is unfunded", async () => {
+    const executor = new SubscriptionExecutor() as any;
+    executor.submitCharge = jest
+      .fn()
+      .mockRejectedValue(new Error("Account not found: G-EXECUTOR"));
+
+    await executor.charge(subscription);
+
+    expect(mockedPaymentFailed).not.toHaveBeenCalled();
+    expect(mockedPrisma.subscription.update).toHaveBeenCalledWith({
+      where: { id: 4 },
+      data: { lastError: "Account not found: G-EXECUTOR" },
+    });
+    expect(mockedPrisma.subscription.update.mock.calls[0][0].data.failureCount).toBeUndefined();
+  });
+
+  it("does not penalize the subscriber when the executor cannot cover the fee", async () => {
+    const executor = new SubscriptionExecutor() as any;
+    executor.submitCharge = jest.fn().mockRejectedValue(new Error("insufficient fee"));
+
+    await executor.charge(subscription);
+
+    expect(mockedPaymentFailed).not.toHaveBeenCalled();
+    expect(mockedPrisma.subscription.update.mock.calls[0][0].data.failureCount).toBeUndefined();
+  });
+
+  it("still records a genuine on-chain failure against the subscriber and emails once", async () => {
+    const executor = new SubscriptionExecutor() as any;
+    executor.submitCharge = jest
+      .fn()
+      .mockRejectedValue(new Error("Transaction abc failed on-chain"));
+
+    await executor.charge(subscription);
+
+    expect(mockedPaymentFailed).toHaveBeenCalledTimes(1);
+    expect(mockedPrisma.subscription.update.mock.calls[0][0].data).toEqual(
+      expect.objectContaining({ failureCount: 1 })
+    );
   });
 });

@@ -275,8 +275,8 @@ model EmailEvent {
   subject           String
   type              EmailEventType
   // Resend's message id, so a later webhook (delivered/bounced/complained)
-  // can be linked back to the SENT row for the same send. Null for send
-  // attempts that failed before Resend returned an id.
+  // can be linked back to the SENT row for the same recipient. Null for
+  // send attempts that failed before Resend returned an id.
   providerMessageId String?
   // Populated on FAILED/BOUNCED rows so the failure is diagnosable from the
   // row alone, without cross-referencing stdout logs.
@@ -285,4 +285,15 @@ model EmailEvent {
 
   @@index([recipient, createdAt])
   @@index([providerMessageId])
+}
+
+// Small key/value store for operational state that must survive restarts.
+// Currently holds the last Soroban ledger sequence the backend observed
+// (`soroban:lastSeenLedger`), which testnet-reset detection (#278) compares
+// against the chain's latest sequence — a jump backwards means the network
+// was wiped and every on-chain ID the backend cached is invalid.
+model NetworkCheckpoint {
+  key       String   @id
+  value     String
+  updatedAt DateTime @updatedAt
 }

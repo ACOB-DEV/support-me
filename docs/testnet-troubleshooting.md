@@ -25,6 +25,7 @@ fails if a title has no matching heading here.
 ## Contents
 
 - [Before you start: testnet checklist](#before-you-start-testnet-checklist)
+- [Testnet reset runbook](#testnet-reset-runbook)
 - [Wallet connection errors](#wallet-connection-errors)
 - [Donation and subscription errors](#donation-and-subscription-errors)
 - [Reading a raw "Transaction rejected" message](#reading-a-raw-transaction-rejected-message)
@@ -57,7 +58,8 @@ Most testnet failures come from a short list of causes. Check these first:
    `NEXT_PUBLIC_DONATION_CONTRACT_ID` (frontend) and the backend's contract
    IDs point at contracts from before a reset, every call fails during
    simulation. Redeploy, or use the IDs in the README contract table. See
-   [contract-deploy-workflow.md](contract-deploy-workflow.md).
+   [contract-deploy-workflow.md](contract-deploy-workflow.md) and the
+   [testnet reset runbook](#testnet-reset-runbook).
 5. **Soroban RPC is up.** The frontend uses `NEXT_PUBLIC_SOROBAN_RPC_URL`
    (default `https://soroban-testnet.stellar.org`). Check
    [status.stellar.org](https://status.stellar.org). The backend's
@@ -67,6 +69,56 @@ Most testnet failures come from a short list of causes. Check these first:
    (see [admin-multisig-timelock.md](admin-multisig-timelock.md)). While it is
    paused, `donate`, `subscribe`, `charge_subscription` and `register_creator`
    all fail with `contract is currently paused`.
+
+## Testnet reset runbook
+
+The Stellar Development Foundation resets the public testnet from time to time.
+A reset wipes every deployed contract, restarts the ledger sequence and empties
+accounts the reset did not preserve. After a reset the previously configured
+`NEXT_PUBLIC_DONATION_CONTRACT_ID` no longer exists, so every simulated call
+fails and the backend's subscription executor can no longer charge anything.
+
+The backend detects a reset automatically (#278): it stores the last ledger
+sequence it observed and treats a lower "latest ledger" — or a missing donation
+contract — as a reset. When that happens:
+
+- The executor and event listener pause, so no charges are attempted and no
+  failure emails are sent for subscriptions that simply ceased to exist.
+- `GET /health` reports `status: "unhealthy"` and
+  `network: "reset_detected"` (the reason is under `dependencies.network.reason`).
+- A fatal message is sent to Sentry.
+
+### Recovering from a reset
+
+1. **Redeploy the contracts** to the testnet. Follow
+   [contract-deploy-workflow.md](contract-deploy-workflow.md) and note the new
+   donation and creator-registry contract IDs.
+2. **Update the contract IDs** in the frontend and backend environments
+   (`NEXT_PUBLIC_DONATION_CONTRACT_ID`,
+   `NEXT_PUBLIC_CREATOR_REGISTRY_CONTRACT_ID`), then **restart the backend** so
+   the new values are loaded. Boot validation (#281) fails fast if the IDs and
+   the configured network still disagree, or if the executor key is invalid.
+3. **Run the resync.** Sign in as an allowlisted admin and call:
+
+   ```bash
+   curl -X POST https://<backend>/api/admin/network-resync \
+     -H "Authorization: Bearer <admin-token>"
+   ```
+
+   This clears the event cursor, marks the old (now non-existent) active
+   subscriptions inactive with an explanatory `lastError`, clears the reset
+   state and ledger checkpoint, and restarts the executor and listener against
+   the new deployment. The response reports how many subscriptions were
+   deactivated.
+4. **Confirm recovery.** `GET /health` returns `status: "ok"` and
+   `network: "ok"`, and `GET /health/executor` shows a fresh run.
+5. **Re-seed demo data if needed** (`npx prisma db seed`) and ask supporters to
+   subscribe again from the creator's page.
+
+The ledger checkpoint lives in the `NetworkCheckpoint` table (`key =
+"soroban:lastSeenLedger"`). Clearing it by hand
+(`DELETE FROM "NetworkCheckpoint";`) has the same effect as the checkpoint step
+of the resync, for environments where the admin endpoint cannot be reached.
 
 ## Wallet connection errors
 

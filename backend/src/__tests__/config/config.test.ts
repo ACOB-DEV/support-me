@@ -5,6 +5,11 @@ import {
   getJwtSecret,
   getRateLimitConfig,
 } from "../../config";
+import { Keypair, Networks } from "@stellar/stellar-sdk";
+import {
+  validateStellarNetworkSetup,
+  validateStellarSetup,
+} from "../../services/startupValidation";
 
 describe("required env validation (#178)", () => {
   const originalNodeEnv = process.env.NODE_ENV;
@@ -160,5 +165,111 @@ describe("rate limit configuration (#25)", () => {
   it("rejects invalid explicit values", () => {
     process.env.AUTH_RATE_LIMIT_IP_MAX = "0";
     expect(() => getRateLimitConfig()).toThrow(/AUTH_RATE_LIMIT_IP_MAX must be a positive integer/);
+  });
+});
+
+describe("Stellar network boot validation (#281)", () => {
+  const trackedVars = [
+    "NODE_ENV",
+    "STELLAR_NETWORK",
+    "NEXT_PUBLIC_STELLAR_NETWORK",
+    "NEXT_PUBLIC_DONATION_CONTRACT_ID",
+    "NEXT_PUBLIC_CREATOR_REGISTRY_CONTRACT_ID",
+    "EXECUTOR_SECRET_KEY",
+  ] as const;
+  const originals = Object.fromEntries(trackedVars.map((name) => [name, process.env[name]]));
+
+  const donationContractId =
+    "CD6T563YCSYQHDMXC7VCFTKMWMXWHFHAU4NO7EAMFK57QLFI7SSXICYY";
+  const validSecret = Keypair.random().secret();
+
+  const matchingProbes = {
+    getNetworkPassphraseAt: async () => Networks.TESTNET,
+    contractExists: async () => true,
+  };
+
+  beforeEach(() => {
+    process.env.NODE_ENV = "test";
+    process.env.STELLAR_NETWORK = "testnet";
+    delete process.env.NEXT_PUBLIC_STELLAR_NETWORK;
+    process.env.NEXT_PUBLIC_DONATION_CONTRACT_ID = donationContractId;
+    delete process.env.NEXT_PUBLIC_CREATOR_REGISTRY_CONTRACT_ID;
+    process.env.EXECUTOR_SECRET_KEY = validSecret;
+  });
+
+  afterAll(() => {
+    for (const name of trackedVars) {
+      const value = originals[name];
+      if (value === undefined) delete process.env[name];
+      else process.env[name] = value;
+    }
+  });
+
+  it("accepts endpoints and contracts that match the configured network", async () => {
+    const result = await validateStellarSetup(matchingProbes);
+
+    expect(result.ok).toBe(true);
+    expect(result.problems).toEqual([]);
+    expect(result.summary.network).toBe("testnet");
+    expect(result.summary.networkPassphrase).toBe(Networks.TESTNET);
+    expect(result.summary.donationContractId).toBe(donationContractId);
+    expect(result.summary.executorPublicKey).toBe(
+      Keypair.fromSecret(validSecret).publicKey()
+    );
+  });
+
+  it("flags an endpoint whose passphrase disagrees with the configured network", async () => {
+    const result = await validateStellarSetup({
+      getNetworkPassphraseAt: async () => Networks.PUBLIC,
+      contractExists: async () => true,
+    });
+
+    expect(result.ok).toBe(false);
+    expect(result.problems.join(" ")).toMatch(/passphrase/i);
+  });
+
+  it("flags a configured contract that does not exist on the network", async () => {
+    const result = await validateStellarSetup({
+      getNetworkPassphraseAt: async () => Networks.TESTNET,
+      contractExists: async () => false,
+    });
+
+    expect(result.ok).toBe(false);
+    expect(result.problems.join(" ")).toMatch(/does not exist/i);
+  });
+
+  it("treats an unreachable endpoint as a warning rather than a fatal problem", async () => {
+    const result = await validateStellarSetup({
+      getNetworkPassphraseAt: async () => {
+        throw new Error("ECONNREFUSED");
+      },
+      contractExists: async () => true,
+    });
+
+    expect(result.ok).toBe(true);
+    expect(result.problems).toEqual([]);
+    expect(result.warnings.join(" ")).toMatch(/could not be validated/i);
+  });
+
+  it("flags an executor secret key that is not a parseable Stellar secret", async () => {
+    process.env.EXECUTOR_SECRET_KEY = "not-a-valid-secret";
+
+    const result = await validateStellarSetup(matchingProbes);
+
+    expect(result.ok).toBe(false);
+    expect(result.problems.join(" ")).toMatch(/EXECUTOR_SECRET_KEY/);
+  });
+
+  it("fails startup in production on a mismatch but only warns in development", async () => {
+    const mismatch = {
+      getNetworkPassphraseAt: async () => Networks.PUBLIC,
+      contractExists: async () => true,
+    };
+
+    process.env.NODE_ENV = "development";
+    await expect(validateStellarNetworkSetup(mismatch)).resolves.toBeUndefined();
+
+    process.env.NODE_ENV = "production";
+    await expect(validateStellarNetworkSetup(mismatch)).rejects.toThrow(/passphrase/i);
   });
 });

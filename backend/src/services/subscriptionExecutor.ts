@@ -1,8 +1,8 @@
 import {
+  Account,
   BASE_FEE,
   Contract,
   Keypair,
-  Networks,
   TransactionBuilder,
   nativeToScVal,
 } from "@stellar/stellar-sdk";
@@ -13,16 +13,21 @@ import {
   notifySubscriptionRenewed,
 } from "./subscriptionNotifications";
 import { withSorobanRpcServer } from "./sorobanRpc";
+import { getAccountBalanceXlm } from "./sorobanContracts";
 import { executorHealth } from "./executorHealth";
 import { applyDonationToGoals } from "./goalService";
 import { notifyGoalsReached } from "./donationNotifications";
 import { log } from "../lib/logger";
 import * as Sentry from "@sentry/node";
 
-const NETWORK_PASSPHRASE = Networks.TESTNET;
-
 import { config } from "../config";
 import { toAmount } from "../lib/money";
+import {
+  getFriendbotUrl,
+  getNetworkPassphrase,
+  isTestnetLike,
+} from "./stellarNetwork";
+import { networkReset } from "./networkReset";
 
 const getDonationContractId = (): string | undefined => config.donationContractId || undefined;
 const getExecutorSecretKey = (): string | undefined => config.executorSecretKey || undefined;
@@ -30,6 +35,39 @@ const getPollIntervalMs = (): number => {
   const configured = Number(process.env.SUBSCRIPTION_EXECUTOR_POLL_INTERVAL_MS);
   return Number.isFinite(configured) && configured > 0 ? configured : 60_000;
 };
+
+/**
+ * Errors that describe the executor's own account rather than the subscription
+ * being charged (#279): an unfunded executor account or a fee it cannot cover.
+ * Counting these against the subscriber would deactivate subscriptions and
+ * email supporters over a backend funding problem, so they are reported
+ * (Sentry, health, lastError) without incrementing failureCount or sending a
+ * failure notice. A real on-chain revert is left alone and still counts.
+ */
+const EXECUTOR_SIDE_ERROR_PATTERNS = [
+  /account not found/i,
+  /insufficient fee/i,
+  /fee is not sufficient/i,
+  /txInsufficientFee/i,
+];
+
+export function isExecutorSideChargeError(message: string): boolean {
+  return EXECUTOR_SIDE_ERROR_PATTERNS.some((pattern) => pattern.test(message));
+}
+
+function errorMessage(error: unknown): string {
+  return error instanceof Error ? error.message : String(error);
+}
+
+/**
+ * The real reason behind a `withSorobanRpcServer` failure: the aggregate
+ * "failed on all configured endpoints" wrapper hides the per-endpoint error
+ * (e.g. "Account not found: G...") in its `cause`.
+ */
+function errorCauseMessage(error: unknown): string {
+  const cause = (error as { cause?: unknown } | null)?.cause;
+  return cause ? errorMessage(cause) : errorMessage(error);
+}
 
 /**
  * Periodically charges due recurring-donation subscriptions by calling the
@@ -69,6 +107,16 @@ export class SubscriptionExecutor {
     const expectedIntervalMs =
       Number(process.env.SUBSCRIPTION_EXECUTOR_EXPECTED_INTERVAL_MS) || pollIntervalMs * 3;
     executorHealth.markEnabled(expectedIntervalMs);
+
+    // #279: make sure the executor can pay fees before the first charge is due.
+    // Fire-and-forget so a slow Friendbot response doesn't delay startup; the
+    // failure is logged and picked up by the next restart or health check.
+    void this.ensureExecutorFunded().catch((error) => {
+      log("error", "SubscriptionExecutor funding check failed", {
+        error: errorMessage(error),
+      });
+    });
+
     this.timer = setInterval(() => {
       void this.tick();
     }, pollIntervalMs);
@@ -78,6 +126,88 @@ export class SubscriptionExecutor {
       pollIntervalMs,
       expectedIntervalMs,
     });
+  }
+
+  /**
+   * Ensures the executor account exists and can pay transaction fees (#279).
+   *
+   * On testnet/futurenet an unfunded account is funded via Friendbot —
+   * otherwise a fresh deployment would sit unable to charge anything. On
+   * mainnet there is deliberately no friendbot path: balance is only read and
+   * reported, and a missing account is left for an operator to fund. Balance
+   * is recorded on executorHealth for /health/executor.
+   */
+  async ensureExecutorFunded(): Promise<void> {
+    const keypair = this.keypair;
+    if (!keypair) return;
+
+    const publicKey = keypair.publicKey();
+
+    let account = await this.tryGetAccount(publicKey);
+    if (!account && isTestnetLike()) {
+      const friendbotUrl = `${getFriendbotUrl()}?addr=${encodeURIComponent(publicKey)}`;
+      log("info", "Executor account unfunded; requesting Friendbot funding", {
+        executorAddress: publicKey,
+      });
+
+      const response = await fetch(friendbotUrl, { method: "GET" });
+      if (!response.ok) {
+        throw new Error(`Friendbot funding failed: HTTP ${response.status}`);
+      }
+
+      account = await this.tryGetAccount(publicKey);
+      if (!account) {
+        throw new Error("Executor account still unfunded after the Friendbot call");
+      }
+      log("info", "Executor account funded via Friendbot", {
+        executorAddress: publicKey,
+      });
+    }
+
+    if (!account) {
+      log("warn", "Executor account does not exist on-chain", {
+        executorAddress: publicKey,
+        network: getNetworkPassphrase(),
+      });
+    }
+
+    const balanceXlm = await this.getExecutorBalanceXlm(publicKey);
+    executorHealth.setBalance(balanceXlm);
+    if (balanceXlm != null) {
+      log("info", "Executor account balance", {
+        executorAddress: publicKey,
+        balanceXlm,
+      });
+    }
+  }
+
+  /**
+   * Returns the account, or null when the account simply does not exist.
+   * Transport/RPC errors are rethrown: only a definitive "account not found"
+   * should trigger a Friendbot request, so a transient outage never mints a
+   * new funding call.
+   */
+  private async tryGetAccount(address: string): Promise<Account | null> {
+    try {
+      return await withSorobanRpcServer("getAccount", (server) => server.getAccount(address), {
+        retries: 0,
+      });
+    } catch (error) {
+      if (/account not found/i.test(errorCauseMessage(error))) return null;
+      throw error;
+    }
+  }
+
+  private async getExecutorBalanceXlm(address: string): Promise<string | null> {
+    try {
+      return await getAccountBalanceXlm(address);
+    } catch (error) {
+      log("warn", "Could not read executor balance", {
+        executorAddress: address,
+        error: errorMessage(error),
+      });
+      return null;
+    }
   }
 
   stop(): void {
@@ -90,6 +220,13 @@ export class SubscriptionExecutor {
   /** Runs one pass over every due subscription. Public so tests can drive it. */
   async tick(): Promise<void> {
     if (this.running) return;
+    // #278: a detected testnet reset invalidates every cached on-chain ID, so
+    // charging would only produce misleading failures. The listener is paused
+    // too; this guard covers a tick already in flight when detection fires.
+    if (networkReset.getState().status === "reset_detected") {
+      log("warn", "SubscriptionExecutor tick skipped: network reset detected");
+      return;
+    }
     this.running = true;
     executorHealth.runStarted();
     let ok = false;
@@ -145,7 +282,15 @@ export class SubscriptionExecutor {
     try {
       hash = await this.submitCharge(subscription);
     } catch (error) {
-      await this.recordFailure(subscription, (error as Error).message);
+      // #279: distinguish "the executor's account can't pay" from "this
+      // subscription's charge was rejected on-chain". Only the latter should
+      // count against the subscriber.
+      const cause = errorCauseMessage(error);
+      if (isExecutorSideChargeError(cause)) {
+        await this.recordExecutorSideFailure(subscription, cause);
+        return;
+      }
+      await this.recordFailure(subscription, errorMessage(error));
       return;
     }
 
@@ -212,6 +357,42 @@ export class SubscriptionExecutor {
       });
     }
     await notifyGoalsReached(reachedGoals);
+  }
+
+  /**
+   * Records an executor-side failure (unfunded account, insufficient fee)
+   * without penalizing the subscriber (#279). The subscription keeps its
+   * failureCount and stays active, so it charges normally once the executor is
+   * funded again; lastError and health still expose the problem.
+   */
+  private async recordExecutorSideFailure(
+    subscription: Subscription,
+    message: string
+  ): Promise<void> {
+    log("error", "SubscriptionExecutor charge skipped: executor-side error", {
+      subscriptionId: subscription.id,
+      creatorId: subscription.creatorId,
+      supporterAddress: subscription.supporterAddress,
+      amount: subscription.amount,
+      token: subscription.token,
+      error: message,
+    });
+
+    Sentry.captureException(new Error(`Executor-side charge error: ${message}`), {
+      tags: {
+        subscriptionId: String(subscription.id),
+        executorSide: "true",
+      },
+    });
+
+    executorHealth.recordCharge(subscription.id, "failure", message);
+
+    // Deliberately no failureCount increment, no deactivation, no supporter
+    // email: the failure is the backend's, not the subscriber's.
+    await prisma.subscription.update({
+      where: { id: subscription.id },
+      data: { lastError: message },
+    });
   }
 
   private async recordFailure(subscription: Subscription, message: string): Promise<void> {
@@ -295,7 +476,7 @@ export class SubscriptionExecutor {
 
     const tx = new TransactionBuilder(account, {
       fee: BASE_FEE,
-      networkPassphrase: NETWORK_PASSPHRASE,
+      networkPassphrase: getNetworkPassphrase(),
     })
       .addOperation(
         contract.call(
