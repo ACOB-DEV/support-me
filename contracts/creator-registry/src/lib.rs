@@ -122,7 +122,7 @@ impl CreatorRegistryContract {
             !env.storage().instance().has(&ADMIN_KEY) && !env.storage().instance().has(&ADMINS_KEY),
             "registry already initialized"
         );
-        assert!(admins.len() > 0, "admin list cannot be empty");
+        assert!(!admins.is_empty(), "admin list cannot be empty");
         assert!(
             threshold > 0 && threshold <= admins.len(),
             "invalid signature threshold"
@@ -303,7 +303,7 @@ impl CreatorRegistryContract {
                         new_admins.push_back(a);
                     }
                 }
-                assert!(new_admins.len() > 0, "cannot remove all admins");
+                assert!(!new_admins.is_empty(), "cannot remove all admins");
                 let threshold: u32 = env.storage().instance().get(&THRESHOLD_KEY).unwrap();
                 assert!(
                     threshold <= new_admins.len(),
@@ -363,7 +363,7 @@ impl CreatorRegistryContract {
             .get::<_, CreatorProfile>(&creator)
         {
             // If the profile exists, it must be a placeholder created by record_donation
-            assert!(p.username.len() == 0, "creator already registered");
+            assert!(p.username.is_empty(), "creator already registered");
             CreatorProfile {
                 address: creator.clone(),
                 username: username.clone(),
@@ -394,7 +394,7 @@ impl CreatorRegistryContract {
             .persistent()
             .get::<_, CreatorProfile>(&creator);
         if let Some(p) = profile {
-            if p.username.len() > 0 {
+            if !p.username.is_empty() {
                 return Some(p);
             }
         }
@@ -599,7 +599,7 @@ mod tests {
 
         let prop = client.get_proposal(&prop_id).unwrap();
         assert_eq!(prop.approvals_count, 1);
-        assert_eq!(prop.executed, false);
+        assert!(!prop.executed);
 
         client.approve_admin_action(&admin2, &prop_id);
 
@@ -609,7 +609,7 @@ mod tests {
         client.execute_admin_action(&admin1, &prop_id);
 
         let prop_after = client.get_proposal(&prop_id).unwrap();
-        assert_eq!(prop_after.executed, true);
+        assert!(prop_after.executed);
     }
 
     #[test]

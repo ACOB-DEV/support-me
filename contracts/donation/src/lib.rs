@@ -189,7 +189,7 @@ impl DonationContract {
             !env.storage().instance().has(&ADMIN_KEY) && !env.storage().instance().has(&ADMINS_KEY),
             "donation contract already initialized"
         );
-        assert!(admins.len() > 0, "admin list cannot be empty");
+        assert!(!admins.is_empty(), "admin list cannot be empty");
         assert!(
             threshold > 0 && threshold <= admins.len(),
             "invalid signature threshold"
@@ -379,7 +379,7 @@ impl DonationContract {
                         new_admins.push_back(a);
                     }
                 }
-                assert!(new_admins.len() > 0, "cannot remove all admins");
+                assert!(!new_admins.is_empty(), "cannot remove all admins");
                 let threshold: u32 = env.storage().instance().get(&THRESHOLD_KEY).unwrap();
                 assert!(
                     threshold <= new_admins.len(),
@@ -982,7 +982,7 @@ mod tests {
 
         let prop = donation_client.get_proposal(&prop_id).unwrap();
         assert_eq!(prop.approvals_count, 1);
-        assert_eq!(prop.executed, false);
+        assert!(!prop.executed);
 
         donation_client.approve_admin_action(&admin2, &prop_id);
 
@@ -995,7 +995,7 @@ mod tests {
         donation_client.execute_admin_action(&admin1, &prop_id);
 
         let prop_exec = donation_client.get_proposal(&prop_id).unwrap();
-        assert_eq!(prop_exec.executed, true);
+        assert!(prop_exec.executed);
     }
 
     #[test]
@@ -1004,9 +1004,9 @@ mod tests {
         env.mock_all_auths_allowing_non_root_auth();
         let (admin, donation_client, _registry_client) = setup(&env);
 
-        assert_eq!(donation_client.is_paused(), false);
+        assert!(!donation_client.is_paused());
         donation_client.emergency_pause(&admin);
-        assert_eq!(donation_client.is_paused(), true);
+        assert!(donation_client.is_paused());
     }
 
     #[test]
