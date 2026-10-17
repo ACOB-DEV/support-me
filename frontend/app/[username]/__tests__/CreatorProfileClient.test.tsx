@@ -12,14 +12,16 @@ import { connectWallet } from '@/lib/wallet';
 // render has to be wrapped in `act` (and awaited) for React to actually
 // flush past the suspended commit once the (already-resolved) promise
 // settles — otherwise React Testing Library never sees the real content.
-async function renderProfile(username: string) {
+async function renderProfile(username: string, initialLocale?: 'en' | 'es') {
+  let result!: ReturnType<typeof render>;
   await act(async () => {
-    render(
+    result = render(
       <Suspense fallback={null}>
-        <CreatorProfileClient params={Promise.resolve({ username })} />
+        <CreatorProfileClient params={Promise.resolve({ username })} initialLocale={initialLocale} />
       </Suspense>
     );
   });
+  return result;
 }
 
 vi.mock('@/context/AuthContext', () => ({
@@ -492,6 +494,75 @@ describe('CreatorProfileClient', () => {
       await waitFor(() =>
         expect(screen.getByRole('button', { name: /conectar billetera/i })).toBeInTheDocument()
       );
+    });
+
+    describe('lang attribute', () => {
+      afterEach(() => {
+        document.documentElement.lang = 'en';
+      });
+
+      it('follows the selected locale on <html> and the translated region', async () => {
+        mockFetchSequence({
+          '/api/creators/alice': baseCreator,
+          '/api/goals/alice': { items: [] },
+        });
+
+        const { container } = await renderProfile('alice');
+        await waitFor(() => expect(screen.getByText('Alice')).toBeInTheDocument());
+        expect(document.documentElement.lang).toBe('en');
+        expect(container.querySelector('[lang]')).toHaveAttribute('lang', 'en');
+
+        await userEvent.selectOptions(screen.getByRole('combobox', { name: /language/i }), 'es');
+
+        await waitFor(() => expect(document.documentElement.lang).toBe('es'));
+        expect(container.querySelector('[lang]')).toHaveAttribute('lang', 'es');
+
+        await userEvent.selectOptions(screen.getByRole('combobox', { name: /idioma/i }), 'en');
+        await waitFor(() => expect(document.documentElement.lang).toBe('en'));
+      });
+
+      it('restores the default lang when leaving the page', async () => {
+        fakeLocalStorage.setItem('supportme-locale', 'es');
+        mockFetchSequence({
+          '/api/creators/alice': baseCreator,
+          '/api/goals/alice': { items: [] },
+        });
+
+        const { unmount } = await renderProfile('alice');
+        await waitFor(() => expect(document.documentElement.lang).toBe('es'));
+
+        unmount();
+        expect(document.documentElement.lang).toBe('en');
+      });
+
+      it('renders the server-provided cookie locale on the first render', async () => {
+        fakeLocalStorage.setItem('supportme-locale', 'es');
+        mockFetchSequence({
+          '/api/creators/alice': baseCreator,
+          '/api/goals/alice': { items: [] },
+        });
+
+        const { container } = await renderProfile('alice', 'es');
+
+        expect(container.querySelector('[lang]')).toHaveAttribute('lang', 'es');
+        await waitFor(() =>
+          expect(screen.getByRole('button', { name: /conectar billetera/i })).toBeInTheDocument()
+        );
+      });
+
+      it('tells readers which surfaces are translated', async () => {
+        mockFetchSequence({
+          '/api/creators/alice': baseCreator,
+          '/api/goals/alice': { items: [] },
+        });
+
+        await renderProfile('alice');
+        await waitFor(() => expect(screen.getByText('Alice')).toBeInTheDocument());
+
+        expect(screen.getByRole('combobox', { name: /language/i })).toHaveAccessibleDescription(
+          /this profile and the donation form only/i
+        );
+      });
     });
   });
 

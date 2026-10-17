@@ -8,7 +8,17 @@ vi.mock('@/app/[username]/creator-summary', () => ({
 }));
 
 vi.mock('@/app/[username]/CreatorProfileClient', () => ({
-  default: () => <div data-testid="creator-profile-client" />,
+  default: ({ initialLocale }: { initialLocale?: string }) => (
+    <div data-testid="creator-profile-client" data-initial-locale={initialLocale} />
+  ),
+}));
+
+let localeCookie: string | undefined;
+vi.mock('next/headers', () => ({
+  cookies: async () => ({
+    get: (name: string) =>
+      name === 'supportme_locale' && localeCookie !== undefined ? { name, value: localeCookie } : undefined,
+  }),
 }));
 
 const mockFetchCreatorSummary = vi.mocked(fetchCreatorSummary);
@@ -21,6 +31,7 @@ function getJsonLd(container: HTMLElement) {
 describe('CreatorProfilePage JSON-LD', () => {
   beforeEach(() => {
     mockFetchCreatorSummary.mockReset();
+    localeCookie = undefined;
   });
 
   it('emits a ProfilePage/Person JSON-LD block with name, image, and description', async () => {
@@ -74,5 +85,44 @@ describe('CreatorProfilePage JSON-LD', () => {
     const { container } = render(page);
 
     expect(container.querySelector('script[type="application/ld+json"]')).toBeNull();
+  });
+});
+
+describe('CreatorProfilePage locale', () => {
+  beforeEach(() => {
+    mockFetchCreatorSummary.mockResolvedValue(null);
+    localeCookie = undefined;
+  });
+
+  const renderPage = async () => {
+    const page = await CreatorProfilePage({ params: Promise.resolve({ username: 'alice' }) });
+    return render(page).container;
+  };
+
+  const langScript = (container: HTMLElement) =>
+    Array.from(container.querySelectorAll('script:not([type])')).find((s) =>
+      s.innerHTML.includes('documentElement.lang'),
+    );
+
+  it('passes the cookie locale to the client and patches <html lang> before first paint', async () => {
+    localeCookie = 'es';
+    const container = await renderPage();
+
+    expect(container.querySelector('[data-testid="creator-profile-client"]')).toHaveAttribute(
+      'data-initial-locale',
+      'es',
+    );
+    expect(langScript(container)?.innerHTML).toBe('document.documentElement.lang="es";');
+  });
+
+  it.each([undefined, 'fr', '"><script>'])('falls back to English for cookie %j', async (value) => {
+    localeCookie = value;
+    const container = await renderPage();
+
+    expect(container.querySelector('[data-testid="creator-profile-client"]')).toHaveAttribute(
+      'data-initial-locale',
+      'en',
+    );
+    expect(langScript(container)).toBeUndefined();
   });
 });
