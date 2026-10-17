@@ -6,14 +6,14 @@
 //! contract — this contract talks to it exclusively through cross-contract
 //! calls (`env.invoke_contract`), so the two contracts can be deployed,
 //! upgraded, and audited independently.
-//! 
+//!
 //! # Storage & Rent Tradeoffs
-//! 
-//! To minimize Soroban state rent, the append-only donation log stored in 
+//!
+//! To minimize Soroban state rent, the append-only donation log stored in
 //! this contract operates without explicit `extend_ttl` calls. Over time, as
-//! volume grows, old records may expire and disappear from `get_donation`. 
-//! This is an accepted design choice: the backend indexing `DonatedEvent`s 
-//! is the canonical source of long-term history. Future contract upgrades 
+//! volume grows, old records may expire and disappear from `get_donation`.
+//! This is an accepted design choice: the backend indexing `DonatedEvent`s
+//! is the canonical source of long-term history. Future contract upgrades
 //! should avoid relying on the complete on-chain history being present.
 //!
 //! Multi-signature and timelock governance:
@@ -23,8 +23,8 @@
 
 use common::{AdminAction, AdminProposal, CreatorProfile, DonationRecord, Subscription};
 use soroban_sdk::{
-    contract, contracterror, contractevent, contractimpl, symbol_short, token, Address, Env, IntoVal, String,
-    Symbol, Val, Vec,
+    contract, contracterror, contractevent, contractimpl, symbol_short, token, Address, Env,
+    IntoVal, String, Symbol, Val, Vec,
 };
 
 const DONATIONS_KEY: Symbol = symbol_short!("donations");
@@ -54,10 +54,13 @@ pub struct DonatedEvent {
     pub donor: Address,
     #[topic]
     pub creator: Address,
+    pub donation_id: u32,
     pub token: Address,
     pub amount: i128,
+    pub fee_amount: i128,
     pub memo: String,
     pub timestamp: u64,
+    pub subscription_id: Option<u64>,
 }
 
 /// Emitted when a supporter starts a recurring donation. Carries `token`
@@ -138,8 +141,30 @@ pub enum ChargeError {
 #[derive(Copy, Clone, Debug, Eq, PartialEq, PartialOrd, Ord)]
 #[repr(u32)]
 pub enum DonationError {
+    NotInitialized = 3,
+    AlreadyInitialized = 4,
+    Paused = 5,
+    Unauthorized = 6,
+    TokenNotAllowed = 7,
+    MemoTooLong = 8,
     AmountTooLow = 10,
     AmountTooHigh = 11,
+    NotDue = 12,
+    SubscriptionNotActive = 13,
+    SubscriptionNotFound = 14,
+    InvalidAmount = 15,
+    InvalidInterval = 16,
+    InvalidThreshold = 17,
+    EmptyAdminList = 18,
+    ProposalNotFound = 19,
+    ProposalAlreadyExecuted = 20,
+    AlreadyApproved = 21,
+    TimelockNotElapsed = 22,
+    ThresholdExceedsAdmins = 23,
+    CannotRemoveAllAdmins = 24,
+    MultiSigRequired = 25,
+    ExecutorNotSet = 26,
+    Overflow = 27,
 }
 
 #[contractevent(topics = ["sub_failed"])]
@@ -161,10 +186,9 @@ impl DonationContract {
     /// One-time single-admin setup: backwards compatible wrapper initializing 1-of-1 admin setup.
     pub fn initialize(env: Env, admin: Address, registry: Address) {
         admin.require_auth();
-        assert!(
-            !env.storage().instance().has(&ADMIN_KEY) && !env.storage().instance().has(&ADMINS_KEY),
-            "donation contract already initialized"
-        );
+        if env.storage().instance().has(&ADMIN_KEY) || env.storage().instance().has(&ADMINS_KEY) {
+            soroban_sdk::panic_with_error!(&env, DonationError::AlreadyInitialized);
+        }
 
         let mut admins = Vec::new(&env);
         admins.push_back(admin.clone());
@@ -185,12 +209,15 @@ impl DonationContract {
         timelock_delay: u64,
         registry: Address,
     ) {
-        assert!(
-            !env.storage().instance().has(&ADMIN_KEY) && !env.storage().instance().has(&ADMINS_KEY),
-            "donation contract already initialized"
-        );
-        assert!(admins.len() > 0, "admin list cannot be empty");
-        assert!(threshold > 0 && threshold <= admins.len(), "invalid signature threshold");
+        if env.storage().instance().has(&ADMIN_KEY) || env.storage().instance().has(&ADMINS_KEY) {
+            soroban_sdk::panic_with_error!(&env, DonationError::AlreadyInitialized);
+        }
+        if admins.is_empty() {
+            soroban_sdk::panic_with_error!(&env, DonationError::EmptyAdminList);
+        }
+        if threshold == 0 || threshold > admins.len() {
+            soroban_sdk::panic_with_error!(&env, DonationError::InvalidThreshold);
+        }
 
         for i in 0..admins.len() {
             admins.get(i).unwrap().require_auth();
@@ -200,7 +227,9 @@ impl DonationContract {
         env.storage().instance().set(&ADMIN_KEY, &primary_admin);
         env.storage().instance().set(&ADMINS_KEY, &admins);
         env.storage().instance().set(&THRESHOLD_KEY, &threshold);
-        env.storage().instance().set(&TIMELOCK_DELAY_KEY, &timelock_delay);
+        env.storage()
+            .instance()
+            .set(&TIMELOCK_DELAY_KEY, &timelock_delay);
         env.storage().instance().set(&PAUSED_KEY, &false);
         env.storage().instance().set(&REGISTRY_KEY, &registry);
     }
@@ -223,19 +252,34 @@ impl DonationContract {
     /// Emergency pause: any authorized admin can instantly freeze contract operations.
     pub fn emergency_pause(env: Env, admin: Address) {
         admin.require_auth();
-        assert!(Self::is_admin(env.clone(), admin), "caller is not an admin");
+        if !Self::is_admin(env.clone(), admin) {
+            soroban_sdk::panic_with_error!(&env, DonationError::Unauthorized);
+        }
         env.storage().instance().set(&PAUSED_KEY, &true);
     }
 
     /// Proposes a multi-signature administrative action.
     pub fn propose_admin_action(env: Env, proposer: Address, action: AdminAction) -> u64 {
         proposer.require_auth();
-        assert!(Self::is_admin(env.clone(), proposer.clone()), "proposer is not an admin");
+        if !Self::is_admin(env.clone(), proposer.clone()) {
+            soroban_sdk::panic_with_error!(&env, DonationError::Unauthorized);
+        }
 
-        let prop_id: u64 = env.storage().persistent().get(&PROPOSAL_COUNTER_KEY).unwrap_or(0);
-        let timelock: u64 = env.storage().instance().get(&TIMELOCK_DELAY_KEY).unwrap_or(0);
+        let prop_id: u64 = env
+            .storage()
+            .persistent()
+            .get(&PROPOSAL_COUNTER_KEY)
+            .unwrap_or(0);
+        let timelock: u64 = env
+            .storage()
+            .instance()
+            .get(&TIMELOCK_DELAY_KEY)
+            .unwrap_or(0);
         let now = env.ledger().timestamp();
-        let eta = now.checked_add(timelock).expect("proposal eta overflow");
+        let eta = match now.checked_add(timelock) {
+            Some(t) => t,
+            None => soroban_sdk::panic_with_error!(&env, DonationError::Overflow),
+        };
 
         let proposal = AdminProposal {
             id: prop_id,
@@ -247,12 +291,19 @@ impl DonationContract {
             executed: false,
         };
 
-        env.storage().persistent().set(&(PROPOSAL_KEY, prop_id), &proposal);
-        env.storage().persistent().set(&(APPROVAL_KEY, prop_id, proposer.clone()), &true);
-        env.storage().persistent().set(
-            &PROPOSAL_COUNTER_KEY,
-            &prop_id.checked_add(1).expect("proposal counter overflow"),
-        );
+        env.storage()
+            .persistent()
+            .set(&(PROPOSAL_KEY, prop_id), &proposal);
+        env.storage()
+            .persistent()
+            .set(&(APPROVAL_KEY, prop_id, proposer.clone()), &true);
+        let next_prop_id = match prop_id.checked_add(1) {
+            Some(id) => id,
+            None => soroban_sdk::panic_with_error!(&env, DonationError::Overflow),
+        };
+        env.storage()
+            .persistent()
+            .set(&PROPOSAL_COUNTER_KEY, &next_prop_id);
 
         ProposalCreatedEvent {
             proposal_id: prop_id,
@@ -267,28 +318,38 @@ impl DonationContract {
     /// Approves an existing administrative proposal.
     pub fn approve_admin_action(env: Env, admin: Address, proposal_id: u64) {
         admin.require_auth();
-        assert!(Self::is_admin(env.clone(), admin.clone()), "caller is not an admin");
+        if !Self::is_admin(env.clone(), admin.clone()) {
+            soroban_sdk::panic_with_error!(&env, DonationError::Unauthorized);
+        }
 
-        let mut proposal: AdminProposal = env
-            .storage()
-            .persistent()
-            .get(&(PROPOSAL_KEY, proposal_id))
-            .expect("proposal not found");
-        assert!(!proposal.executed, "proposal already executed");
+        let mut proposal: AdminProposal =
+            match env.storage().persistent().get(&(PROPOSAL_KEY, proposal_id)) {
+                Some(p) => p,
+                None => soroban_sdk::panic_with_error!(&env, DonationError::ProposalNotFound),
+            };
+        if proposal.executed {
+            soroban_sdk::panic_with_error!(&env, DonationError::ProposalAlreadyExecuted);
+        }
 
         let has_approved: bool = env
             .storage()
             .persistent()
             .get(&(APPROVAL_KEY, proposal_id, admin.clone()))
             .unwrap_or(false);
-        assert!(!has_approved, "admin has already approved this proposal");
+        if has_approved {
+            soroban_sdk::panic_with_error!(&env, DonationError::AlreadyApproved);
+        }
 
-        env.storage().persistent().set(&(APPROVAL_KEY, proposal_id, admin.clone()), &true);
-        proposal.approvals_count = proposal
-            .approvals_count
-            .checked_add(1)
-            .expect("approvals count overflow");
-        env.storage().persistent().set(&(PROPOSAL_KEY, proposal_id), &proposal);
+        env.storage()
+            .persistent()
+            .set(&(APPROVAL_KEY, proposal_id, admin.clone()), &true);
+        proposal.approvals_count = match proposal.approvals_count.checked_add(1) {
+            Some(c) => c,
+            None => soroban_sdk::panic_with_error!(&env, DonationError::Overflow),
+        };
+        env.storage()
+            .persistent()
+            .set(&(PROPOSAL_KEY, proposal_id), &proposal);
 
         ProposalApprovedEvent {
             proposal_id,
@@ -301,23 +362,31 @@ impl DonationContract {
     /// Executes an administrative proposal once signature threshold & timelock criteria are met.
     pub fn execute_admin_action(env: Env, executor: Address, proposal_id: u64) {
         executor.require_auth();
-        assert!(Self::is_admin(env.clone(), executor.clone()), "caller is not an admin");
+        if !Self::is_admin(env.clone(), executor.clone()) {
+            soroban_sdk::panic_with_error!(&env, DonationError::Unauthorized);
+        }
 
-        let mut proposal: AdminProposal = env
-            .storage()
-            .persistent()
-            .get(&(PROPOSAL_KEY, proposal_id))
-            .expect("proposal not found");
-        assert!(!proposal.executed, "proposal already executed");
+        let mut proposal: AdminProposal =
+            match env.storage().persistent().get(&(PROPOSAL_KEY, proposal_id)) {
+                Some(p) => p,
+                None => soroban_sdk::panic_with_error!(&env, DonationError::ProposalNotFound),
+            };
+        if proposal.executed {
+            soroban_sdk::panic_with_error!(&env, DonationError::ProposalAlreadyExecuted);
+        }
 
-        let threshold: u32 = env.storage().instance().get(&THRESHOLD_KEY).expect("threshold not set");
-        assert!(
-            proposal.approvals_count >= threshold,
-            "insufficient signatures to execute proposal"
-        );
+        let threshold: u32 = match env.storage().instance().get(&THRESHOLD_KEY) {
+            Some(t) => t,
+            None => soroban_sdk::panic_with_error!(&env, DonationError::NotInitialized),
+        };
+        if proposal.approvals_count < threshold {
+            soroban_sdk::panic_with_error!(&env, DonationError::Unauthorized);
+        }
 
         let now = env.ledger().timestamp();
-        assert!(now >= proposal.eta, "proposal timelock delay has not elapsed");
+        if now < proposal.eta {
+            soroban_sdk::panic_with_error!(&env, DonationError::TimelockNotElapsed);
+        }
 
         match proposal.action.clone() {
             AdminAction::SetExecutor(target) => {
@@ -342,17 +411,20 @@ impl DonationContract {
                         new_admins.push_back(a);
                     }
                 }
-                assert!(new_admins.len() > 0, "cannot remove all admins");
+                if new_admins.is_empty() {
+                    soroban_sdk::panic_with_error!(&env, DonationError::CannotRemoveAllAdmins);
+                }
                 let threshold: u32 = env.storage().instance().get(&THRESHOLD_KEY).unwrap();
-                assert!(threshold <= new_admins.len(), "threshold exceeds remaining admin count");
+                if threshold > new_admins.len() {
+                    soroban_sdk::panic_with_error!(&env, DonationError::ThresholdExceedsAdmins);
+                }
                 env.storage().instance().set(&ADMINS_KEY, &new_admins);
             }
             AdminAction::SetThreshold(new_threshold) => {
                 let admins: Vec<Address> = env.storage().instance().get(&ADMINS_KEY).unwrap();
-                assert!(
-                    new_threshold > 0 && new_threshold <= admins.len(),
-                    "invalid new threshold"
-                );
+                if new_threshold == 0 || new_threshold > admins.len() {
+                    soroban_sdk::panic_with_error!(&env, DonationError::InvalidThreshold);
+                }
                 env.storage().instance().set(&THRESHOLD_KEY, &new_threshold);
             }
             AdminAction::Pause => {
@@ -364,7 +436,9 @@ impl DonationContract {
         }
 
         proposal.executed = true;
-        env.storage().persistent().set(&(PROPOSAL_KEY, proposal_id), &proposal);
+        env.storage()
+            .persistent()
+            .set(&(PROPOSAL_KEY, proposal_id), &proposal);
 
         ProposalExecutedEvent {
             proposal_id,
@@ -377,21 +451,22 @@ impl DonationContract {
     pub fn set_executor(env: Env, executor: Address) {
         let threshold: u32 = env.storage().instance().get(&THRESHOLD_KEY).unwrap_or(1);
         if threshold == 1 {
-            let admin: Address = env
-                .storage()
-                .instance()
-                .get(&ADMIN_KEY)
-                .expect("donation contract not initialized");
+            let admin: Address = match env.storage().instance().get(&ADMIN_KEY) {
+                Some(a) => a,
+                None => soroban_sdk::panic_with_error!(&env, DonationError::NotInitialized),
+            };
             admin.require_auth();
             env.storage().instance().set(&EXECUTOR_KEY, &executor);
         } else {
-            panic!("multi-sig required: use propose_admin_action to set executor");
+            soroban_sdk::panic_with_error!(&env, DonationError::MultiSigRequired);
         }
     }
 
     /// Cross-contract call: delegates creator registration to the CreatorRegistry contract.
     pub fn register_creator(env: Env, creator: Address, username: String) -> CreatorProfile {
-        assert!(!Self::is_paused(env.clone()), "contract is currently paused");
+        if Self::is_paused(env.clone()) {
+            soroban_sdk::panic_with_error!(&env, DonationError::Paused);
+        }
         let registry = Self::registry_address(&env);
         let args: Vec<Val> = (creator, username).into_val(&env);
         env.invoke_contract(&registry, &Symbol::new(&env, "register_creator"), args)
@@ -406,22 +481,22 @@ impl DonationContract {
 
     /// Admin-gated: adds a token address to the allowlist.
     pub fn add_allowed_token(env: Env, token: Address) {
-        let admin: Address = env
-            .storage()
-            .instance()
-            .get(&ADMIN_KEY)
-            .expect("donation contract not initialized: call initialize() first");
+        let admin: Address = match env.storage().instance().get(&ADMIN_KEY) {
+            Some(a) => a,
+            None => soroban_sdk::panic_with_error!(&env, DonationError::NotInitialized),
+        };
         admin.require_auth();
-        env.storage().instance().set(&(ALLOWED_TOKEN_KEY, token), &true);
+        env.storage()
+            .instance()
+            .set(&(ALLOWED_TOKEN_KEY, token), &true);
     }
 
     /// Admin-gated: removes a token address from the allowlist.
     pub fn remove_allowed_token(env: Env, token: Address) {
-        let admin: Address = env
-            .storage()
-            .instance()
-            .get(&ADMIN_KEY)
-            .expect("donation contract not initialized: call initialize() first");
+        let admin: Address = match env.storage().instance().get(&ADMIN_KEY) {
+            Some(a) => a,
+            None => soroban_sdk::panic_with_error!(&env, DonationError::NotInitialized),
+        };
         admin.require_auth();
         env.storage().instance().remove(&(ALLOWED_TOKEN_KEY, token));
     }
@@ -433,12 +508,13 @@ impl DonationContract {
 
     /// Admin-gated: sets the minimum donation amount guardrail (0 to disable).
     pub fn set_min_donation(env: Env, min_amount: i128) {
-        assert!(min_amount >= 0, "minimum donation must be non-negative");
-        let admin: Address = env
-            .storage()
-            .instance()
-            .get(&ADMIN_KEY)
-            .expect("donation contract not initialized: call initialize() first");
+        if min_amount < 0 {
+            soroban_sdk::panic_with_error!(&env, DonationError::InvalidAmount);
+        }
+        let admin: Address = match env.storage().instance().get(&ADMIN_KEY) {
+            Some(a) => a,
+            None => soroban_sdk::panic_with_error!(&env, DonationError::NotInitialized),
+        };
         admin.require_auth();
         env.storage().instance().set(&MIN_DONATION_KEY, &min_amount);
     }
@@ -450,12 +526,13 @@ impl DonationContract {
 
     /// Admin-gated: sets the sanity-check maximum donation amount guardrail (0 to disable).
     pub fn set_max_donation(env: Env, max_amount: i128) {
-        assert!(max_amount >= 0, "maximum donation must be non-negative");
-        let admin: Address = env
-            .storage()
-            .instance()
-            .get(&ADMIN_KEY)
-            .expect("donation contract not initialized: call initialize() first");
+        if max_amount < 0 {
+            soroban_sdk::panic_with_error!(&env, DonationError::InvalidAmount);
+        }
+        let admin: Address = match env.storage().instance().get(&ADMIN_KEY) {
+            Some(a) => a,
+            None => soroban_sdk::panic_with_error!(&env, DonationError::NotInitialized),
+        };
         admin.require_auth();
         env.storage().instance().set(&MAX_DONATION_KEY, &max_amount);
     }
@@ -468,9 +545,9 @@ impl DonationContract {
     /// Transfer `amount` of `token` from `donor` to `creator`, record the
     /// donation locally, and notify the CreatorRegistry (cross-contract) so
     /// the creator's lifetime stats stay in sync.
-    /// 
+    ///
     /// NOTE ON TTL: The donation record is stored with the network's default TTL.
-    /// To minimize rent costs on an indefinitely growing append-only log, this 
+    /// To minimize rent costs on an indefinitely growing append-only log, this
     /// contract does not call `extend_ttl` for old records. They are allowed to expire,
     /// with the backend relying on emitted `DonatedEvent`s for history instead.
     pub fn donate(
@@ -481,9 +558,13 @@ impl DonationContract {
         amount: i128,
         memo: String,
     ) -> DonationRecord {
-        assert!(!Self::is_paused(env.clone()), "contract is currently paused");
+        if Self::is_paused(env.clone()) {
+            soroban_sdk::panic_with_error!(&env, DonationError::Paused);
+        }
         donor.require_auth();
-        assert!(amount > 0, "Donation amount must be positive");
+        if amount <= 0 {
+            soroban_sdk::panic_with_error!(&env, DonationError::InvalidAmount);
+        }
 
         let min_amount: i128 = env.storage().instance().get(&MIN_DONATION_KEY).unwrap_or(0);
         if min_amount > 0 && amount < min_amount {
@@ -495,14 +576,12 @@ impl DonationContract {
             soroban_sdk::panic_with_error!(&env, DonationError::AmountTooHigh);
         }
 
-        assert!(
-            memo.len() <= MAX_MEMO_LENGTH,
-            "Donation memo exceeds maximum length"
-        );
-        assert!(
-            Self::is_token_allowed(env.clone(), token.clone()),
-            "Token is not in the allowlist"
-        );
+        if memo.len() > MAX_MEMO_LENGTH {
+            soroban_sdk::panic_with_error!(&env, DonationError::MemoTooLong);
+        }
+        if !Self::is_token_allowed(env.clone(), token.clone()) {
+            soroban_sdk::panic_with_error!(&env, DonationError::TokenNotAllowed);
+        }
 
         let token_client = token::Client::new(&env, &token);
         token_client.transfer(&donor, &creator, &amount);
@@ -510,7 +589,11 @@ impl DonationContract {
         let registry = Self::registry_address(&env);
         let record_args: Vec<Val> =
             (env.current_contract_address(), creator.clone(), amount).into_val(&env);
-        let (): () = env.invoke_contract(&registry, &Symbol::new(&env, "record_donation"), record_args);
+        let (): () = env.invoke_contract(
+            &registry,
+            &Symbol::new(&env, "record_donation"),
+            record_args,
+        );
 
         let donation = DonationRecord {
             donor: donor.clone(),
@@ -530,20 +613,24 @@ impl DonationContract {
         env.storage()
             .persistent()
             .set(&(DONATIONS_KEY, counter), &donation);
+        let next_counter = match counter.checked_add(1) {
+            Some(c) => c,
+            None => soroban_sdk::panic_with_error!(&env, DonationError::Overflow),
+        };
         env.storage()
             .persistent()
-            .set(
-                &DONATION_COUNTER,
-                &counter.checked_add(1).expect("donation counter overflow"),
-            );
+            .set(&DONATION_COUNTER, &next_counter);
 
         DonatedEvent {
             donor,
             creator,
+            donation_id: counter,
             token,
             amount,
+            fee_amount: 0,
             memo,
             timestamp: env.ledger().timestamp(),
+            subscription_id: None,
         }
         .publish(&env);
 
@@ -559,20 +646,26 @@ impl DonationContract {
         amount: i128,
         interval_secs: u64,
     ) -> u64 {
-        assert!(!Self::is_paused(env.clone()), "contract is currently paused");
+        if Self::is_paused(env.clone()) {
+            soroban_sdk::panic_with_error!(&env, DonationError::Paused);
+        }
         supporter.require_auth();
-        assert!(amount > 0, "Subscription amount must be positive");
-        assert!(interval_secs > 0, "Interval must be positive");
-        assert!(
-            Self::is_token_allowed(env.clone(), token.clone()),
-            "Token is not in the allowlist"
-        );
+        if amount <= 0 {
+            soroban_sdk::panic_with_error!(&env, DonationError::InvalidAmount);
+        }
+        if interval_secs == 0 {
+            soroban_sdk::panic_with_error!(&env, DonationError::InvalidInterval);
+        }
+        if !Self::is_token_allowed(env.clone(), token.clone()) {
+            soroban_sdk::panic_with_error!(&env, DonationError::TokenNotAllowed);
+        }
 
         let id: u64 = env.storage().persistent().get(&SUB_COUNTER).unwrap_or(0);
         let now = env.ledger().timestamp();
-        let next_charge_at = now
-            .checked_add(interval_secs)
-            .expect("next charge time overflow");
+        let next_charge_at = match now.checked_add(interval_secs) {
+            Some(t) => t,
+            None => soroban_sdk::panic_with_error!(&env, DonationError::Overflow),
+        };
 
         let subscription = Subscription {
             supporter: supporter.clone(),
@@ -587,10 +680,11 @@ impl DonationContract {
         env.storage()
             .persistent()
             .set(&(SUBSCRIPTIONS_KEY, id), &subscription);
-        env.storage().persistent().set(
-            &SUB_COUNTER,
-            &id.checked_add(1).expect("subscription counter overflow"),
-        );
+        let next_id = match id.checked_add(1) {
+            Some(next) => next,
+            None => soroban_sdk::panic_with_error!(&env, DonationError::Overflow),
+        };
+        env.storage().persistent().set(&SUB_COUNTER, &next_id);
 
         SubscribedEvent {
             supporter,
@@ -610,32 +704,44 @@ impl DonationContract {
     /// allowance the supporter granted this contract, then records and
     /// reports it exactly like a one-off `donate`. Callable only by the
     /// authorized executor (see `set_executor`).
-    pub fn charge_subscription(env: Env, executor: Address, subscription_id: u64) -> Result<DonationRecord, ChargeError> {
-        assert!(!Self::is_paused(env.clone()), "contract is currently paused");
+    pub fn charge_subscription(
+        env: Env,
+        executor: Address,
+        subscription_id: u64,
+    ) -> Result<DonationRecord, ChargeError> {
+        if Self::is_paused(env.clone()) {
+            soroban_sdk::panic_with_error!(&env, DonationError::Paused);
+        }
         executor.require_auth();
-        let authorized_executor: Address = env
-            .storage()
-            .instance()
-            .get(&EXECUTOR_KEY)
-            .expect("executor not set: call set_executor() first");
-        assert_eq!(
-            executor, authorized_executor,
-            "caller is not the authorized executor"
-        );
+        let authorized_executor: Address = match env.storage().instance().get(&EXECUTOR_KEY) {
+            Some(e) => e,
+            None => soroban_sdk::panic_with_error!(&env, DonationError::ExecutorNotSet),
+        };
+        if executor != authorized_executor {
+            soroban_sdk::panic_with_error!(&env, DonationError::Unauthorized);
+        }
 
-        let mut subscription: Subscription = env
+        let mut subscription: Subscription = match env
             .storage()
             .persistent()
             .get(&(SUBSCRIPTIONS_KEY, subscription_id))
-            .expect("subscription not found");
-        assert!(subscription.active, "subscription is not active");
+        {
+            Some(s) => s,
+            None => soroban_sdk::panic_with_error!(&env, DonationError::SubscriptionNotFound),
+        };
+        if !subscription.active {
+            soroban_sdk::panic_with_error!(&env, DonationError::SubscriptionNotActive);
+        }
 
         let now = env.ledger().timestamp();
-        assert!(now >= subscription.next_charge_at, "subscription not yet due");
+        if now < subscription.next_charge_at {
+            soroban_sdk::panic_with_error!(&env, DonationError::NotDue);
+        }
 
         let token_client = token::Client::new(&env, &subscription.token);
-        
-        let allowance = token_client.allowance(&subscription.supporter, &env.current_contract_address());
+
+        let allowance =
+            token_client.allowance(&subscription.supporter, &env.current_contract_address());
         if allowance < subscription.amount {
             SubscriptionChargeFailedEvent {
                 supporter: subscription.supporter.clone(),
@@ -659,19 +765,14 @@ impl DonationContract {
             return Err(ChargeError::InsufficientBalance);
         }
 
-        // Effects before interactions: finalize the reschedule before calling
-        // into the token contract, so nothing the token does during
-        // `transfer_from` can observe or act on a stale `next_charge_at`.
-        subscription.next_charge_at = now
-            .checked_add(subscription.interval_secs)
-            .expect("next charge time overflow");
+        subscription.next_charge_at = match now.checked_add(subscription.interval_secs) {
+            Some(t) => t,
+            None => soroban_sdk::panic_with_error!(&env, DonationError::Overflow),
+        };
         env.storage()
             .persistent()
             .set(&(SUBSCRIPTIONS_KEY, subscription_id), &subscription);
 
-        // Draw on the allowance: this contract is the `spender`, authorized
-        // implicitly since it is the direct invoker (same trick used below
-        // to call the registry as our own contract identity).
         token_client.transfer_from(
             &env.current_contract_address(),
             &subscription.supporter,
@@ -686,8 +787,11 @@ impl DonationContract {
             subscription.amount,
         )
             .into_val(&env);
-        let (): () =
-            env.invoke_contract(&registry, &Symbol::new(&env, "record_donation"), record_args);
+        let (): () = env.invoke_contract(
+            &registry,
+            &Symbol::new(&env, "record_donation"),
+            record_args,
+        );
 
         let memo = String::from_str(&env, "recurring");
         let donation = DonationRecord {
@@ -707,20 +811,24 @@ impl DonationContract {
         env.storage()
             .persistent()
             .set(&(DONATIONS_KEY, counter), &donation);
+        let next_counter = match counter.checked_add(1) {
+            Some(c) => c,
+            None => soroban_sdk::panic_with_error!(&env, DonationError::Overflow),
+        };
         env.storage()
             .persistent()
-            .set(
-                &DONATION_COUNTER,
-                &counter.checked_add(1).expect("donation counter overflow"),
-            );
+            .set(&DONATION_COUNTER, &next_counter);
 
         DonatedEvent {
             donor: subscription.supporter.clone(),
             creator: subscription.creator.clone(),
+            donation_id: counter,
             token: subscription.token.clone(),
             amount: subscription.amount,
+            fee_amount: 0,
             memo,
             timestamp: now,
+            subscription_id: Some(subscription_id),
         }
         .publish(&env);
 
@@ -731,15 +839,17 @@ impl DonationContract {
     pub fn cancel_subscription(env: Env, supporter: Address, subscription_id: u64) {
         supporter.require_auth();
 
-        let mut subscription: Subscription = env
+        let mut subscription: Subscription = match env
             .storage()
             .persistent()
             .get(&(SUBSCRIPTIONS_KEY, subscription_id))
-            .expect("subscription not found");
-        assert_eq!(
-            subscription.supporter, supporter,
-            "not the subscription owner"
-        );
+        {
+            Some(s) => s,
+            None => soroban_sdk::panic_with_error!(&env, DonationError::SubscriptionNotFound),
+        };
+        if subscription.supporter != supporter {
+            soroban_sdk::panic_with_error!(&env, DonationError::Unauthorized);
+        }
 
         subscription.active = false;
         env.storage()
@@ -787,13 +897,13 @@ impl DonationContract {
     }
 
     /// Get all donations count (approximate, stored in counter)
-    /// 
+    ///
     /// NOTE ON STORAGE GROWTH & TTL: The donations log is an append-only structure.
     /// It grows indefinitely, which means state rent accumulates over time.
     /// To avoid unbounded rent costs for the contract, we do not explicitly extend
-    /// the TTL of old donation records. If old records expire due to un-extended 
-    /// TTLs, this function's counter remains valid, but `get_donation` may fail 
-    /// to find them. This is an accepted tradeoff since the emitted `DonatedEvent`s 
+    /// the TTL of old donation records. If old records expire due to un-extended
+    /// TTLs, this function's counter remains valid, but `get_donation` may fail
+    /// to find them. This is an accepted tradeoff since the emitted `DonatedEvent`s
     /// (indexed off-chain) are the canonical long-term record.
     pub fn get_total_donations_count(env: Env) -> u32 {
         env.storage()
@@ -803,12 +913,12 @@ impl DonationContract {
     }
 
     /// Fetch a single donation record by its counter-based index.
-    /// 
-    /// NOTE: Donation records are subject to Soroban's state expiry. 
-    /// Because the on-chain donation log is append-only and grows indefinitely, 
-    /// the contract does not explicitly extend the TTL of these records to save 
+    ///
+    /// NOTE: Donation records are subject to Soroban's state expiry.
+    /// Because the on-chain donation log is append-only and grows indefinitely,
+    /// the contract does not explicitly extend the TTL of these records to save
     /// on state rent. If a record has expired, this function will return `None`.
-    /// Downstream applications should rely on off-chain indexed `DonatedEvent`s 
+    /// Downstream applications should rely on off-chain indexed `DonatedEvent`s
     /// as the canonical historical record, rather than depending on this function
     /// for long-term historical data.
     pub fn get_donation(env: Env, index: u32) -> Option<DonationRecord> {
@@ -843,7 +953,7 @@ mod tests {
 
     use super::*;
     use creator_registry::{CreatorRegistryContract, CreatorRegistryContractClient};
-    use soroban_sdk::testutils::{Address as _, Ledger};
+    use soroban_sdk::testutils::{Address as _, Events, Ledger};
     use soroban_sdk::token::StellarAssetClient;
 
     fn create_token_contract(env: &Env, admin: &Address) -> Address {
@@ -851,7 +961,13 @@ mod tests {
             .address()
     }
 
-    fn setup(env: &Env) -> (Address, DonationContractClient<'_>, CreatorRegistryContractClient<'_>) {
+    fn setup(
+        env: &Env,
+    ) -> (
+        Address,
+        DonationContractClient<'_>,
+        CreatorRegistryContractClient<'_>,
+    ) {
         let admin = Address::generate(env);
         let registry_id = env.register(CreatorRegistryContract, ());
         let donation_id = env.register(DonationContract, ());
@@ -874,7 +990,8 @@ mod tests {
         let creator = Address::generate(&env);
         env.ledger().with_mut(|li| li.sequence_number = 100);
 
-        let profile = donation_client.register_creator(&creator, &String::from_bytes(&env, b"awesome_dev"));
+        let profile =
+            donation_client.register_creator(&creator, &String::from_bytes(&env, b"awesome_dev"));
 
         assert_eq!(profile.donation_count, 0);
         assert_eq!(profile.total_donations, 0);
@@ -903,7 +1020,8 @@ mod tests {
         // 2-of-3 threshold with 100 seconds timelock delay
         donation_client.initialize_multisig(&admins, &2, &100, &registry_id);
 
-        let prop_id = donation_client.propose_admin_action(&admin1, &AdminAction::SetExecutor(executor.clone()));
+        let prop_id = donation_client
+            .propose_admin_action(&admin1, &AdminAction::SetExecutor(executor.clone()));
 
         let prop = donation_client.get_proposal(&prop_id).unwrap();
         assert_eq!(prop.approvals_count, 1);
@@ -963,7 +1081,10 @@ mod tests {
         assert_eq!(donation.donor, donor);
         assert_eq!(donation.creator, creator);
         assert_eq!(donation.memo, String::from_bytes(&env, b"Great work!"));
-        assert_eq!(donation_client.get_donation(&0).unwrap().memo, donation.memo);
+        assert_eq!(
+            donation_client.get_donation(&0).unwrap().memo,
+            donation.memo
+        );
 
         let token_client = token::Client::new(&env, &token_address);
         assert_eq!(token_client.balance(&creator), 1000);
@@ -1009,7 +1130,6 @@ mod tests {
     }
 
     #[test]
-    #[should_panic(expected = "Donation amount must be positive")]
     fn test_donate_rejects_non_positive_amount() {
         let env = Env::default();
         env.mock_all_auths_allowing_non_root_auth();
@@ -1021,13 +1141,14 @@ mod tests {
         donation_client.add_allowed_token(&token_address);
         StellarAssetClient::new(&env, &token_address).mint(&donor, &1_000);
 
-        donation_client.donate(
+        let res = donation_client.try_donate(
             &donor,
             &creator,
             &token_address,
             &0,
             &String::from_bytes(&env, b"nope"),
         );
+        assert_eq!(res.unwrap_err().unwrap(), DonationError::InvalidAmount);
     }
 
     #[test]
@@ -1053,7 +1174,6 @@ mod tests {
     }
 
     #[test]
-    #[should_panic(expected = "Donation memo exceeds maximum length")]
     fn test_donate_rejects_oversized_memo() {
         let env = Env::default();
         env.mock_all_auths_allowing_non_root_auth();
@@ -1066,13 +1186,14 @@ mod tests {
         StellarAssetClient::new(&env, &token_address).mint(&donor, &1_000);
         let oversized_memo = [b'x'; MAX_MEMO_LENGTH as usize + 1];
 
-        donation_client.donate(
+        let res = donation_client.try_donate(
             &donor,
             &creator,
             &token_address,
             &100,
             &String::from_bytes(&env, &oversized_memo),
         );
+        assert_eq!(res.unwrap_err().unwrap(), DonationError::MemoTooLong);
     }
 
     #[test]
@@ -1087,8 +1208,20 @@ mod tests {
         donation_client.add_allowed_token(&token_address);
         StellarAssetClient::new(&env, &token_address).mint(&donor, &10_000);
 
-        donation_client.donate(&donor, &creator, &token_address, &100, &String::from_bytes(&env, b"one"));
-        donation_client.donate(&donor, &creator, &token_address, &200, &String::from_bytes(&env, b"two"));
+        donation_client.donate(
+            &donor,
+            &creator,
+            &token_address,
+            &100,
+            &String::from_bytes(&env, b"one"),
+        );
+        donation_client.donate(
+            &donor,
+            &creator,
+            &token_address,
+            &200,
+            &String::from_bytes(&env, b"two"),
+        );
 
         assert_eq!(donation_client.get_total_donations_count(), 2);
         assert_eq!(donation_client.get_donation(&0).unwrap().amount, 100);
@@ -1158,7 +1291,6 @@ mod tests {
     }
 
     #[test]
-    #[should_panic(expected = "caller is not the authorized executor")]
     fn test_charge_subscription_rejects_unauthorized_executor() {
         let env = Env::default();
         env.mock_all_auths_allowing_non_root_auth();
@@ -1174,11 +1306,11 @@ mod tests {
         donation_client.set_executor(&executor);
         let id = donation_client.subscribe(&supporter, &creator, &token_address, &500, &1_000);
 
-        donation_client.charge_subscription(&impostor, &id);
+        let res = donation_client.try_charge_subscription(&impostor, &id);
+        assert_eq!(res.unwrap_err().unwrap(), DonationError::Unauthorized);
     }
 
     #[test]
-    #[should_panic(expected = "subscription not yet due")]
     fn test_charge_subscription_rejects_before_due() {
         let env = Env::default();
         env.mock_all_auths_allowing_non_root_auth();
@@ -1199,7 +1331,8 @@ mod tests {
         token_client.approve(&supporter, &donation_client.address, &500, &1_000);
 
         // Still at timestamp 1_000, next_charge_at is 2_000 — too early.
-        donation_client.charge_subscription(&executor, &id);
+        let res = donation_client.try_charge_subscription(&executor, &id);
+        assert_eq!(res.unwrap_err().unwrap(), DonationError::NotDue);
     }
 
     #[test]
@@ -1218,16 +1351,21 @@ mod tests {
 
         let token_client = token::Client::new(&env, &token_address);
         token_client.approve(&supporter, &donation_client.address, &500, &1_000);
-        assert_eq!(token_client.allowance(&supporter, &donation_client.address), 500);
+        assert_eq!(
+            token_client.allowance(&supporter, &donation_client.address),
+            500
+        );
 
         donation_client.cancel_subscription(&supporter, &id);
 
         assert!(!donation_client.get_subscription(&id).unwrap().active);
-        assert_eq!(token_client.allowance(&supporter, &donation_client.address), 0);
+        assert_eq!(
+            token_client.allowance(&supporter, &donation_client.address),
+            0
+        );
     }
 
     #[test]
-    #[should_panic(expected = "subscription is not active")]
     fn test_charge_subscription_rejects_cancelled() {
         let env = Env::default();
         env.mock_all_auths_allowing_non_root_auth();
@@ -1250,7 +1388,11 @@ mod tests {
         donation_client.cancel_subscription(&supporter, &id);
 
         env.ledger().with_mut(|li| li.timestamp = 2_000);
-        donation_client.charge_subscription(&executor, &id);
+        let res = donation_client.try_charge_subscription(&executor, &id);
+        assert_eq!(
+            res.unwrap_err().unwrap(),
+            DonationError::SubscriptionNotActive
+        );
     }
 
     #[test]
@@ -1267,7 +1409,6 @@ mod tests {
     }
 
     #[test]
-    #[should_panic(expected = "Token is not in the allowlist")]
     fn test_donate_rejects_unallowed_token() {
         let env = Env::default();
         env.mock_all_auths_allowing_non_root_auth();
@@ -1275,21 +1416,21 @@ mod tests {
 
         let donor = Address::generate(&env);
         let creator = Address::generate(&env);
-        
+
         let token_address = env.register_stellar_asset_contract_v2(admin).address();
         StellarAssetClient::new(&env, &token_address).mint(&donor, &1_000);
 
-        donation_client.donate(
+        let res = donation_client.try_donate(
             &donor,
             &creator,
             &token_address,
             &100,
             &String::from_bytes(&env, b"should fail"),
         );
+        assert_eq!(res.unwrap_err().unwrap(), DonationError::TokenNotAllowed);
     }
 
     #[test]
-    #[should_panic(expected = "Token is not in the allowlist")]
     fn test_subscribe_rejects_unallowed_token() {
         let env = Env::default();
         env.mock_all_auths_allowing_non_root_auth();
@@ -1297,12 +1438,14 @@ mod tests {
 
         let supporter = Address::generate(&env);
         let creator = Address::generate(&env);
-        
+
         let token_address = env.register_stellar_asset_contract_v2(admin).address();
 
         env.ledger().with_mut(|li| li.timestamp = 1_000);
 
-        donation_client.subscribe(&supporter, &creator, &token_address, &100, &2_592_000);
+        let res =
+            donation_client.try_subscribe(&supporter, &creator, &token_address, &100, &2_592_000);
+        assert_eq!(res.unwrap_err().unwrap(), DonationError::TokenNotAllowed);
     }
 
     #[test]
@@ -1327,9 +1470,12 @@ mod tests {
         token_client.approve(&supporter, &donation_client.address, &100, &1_000);
 
         env.ledger().with_mut(|li| li.timestamp = 2_000);
-        
+
         let result = donation_client.try_charge_subscription(&executor, &id);
-        assert_eq!(result.unwrap_err().unwrap(), ChargeError::InsufficientAllowance);
+        assert_eq!(
+            result.unwrap_err().unwrap(),
+            ChargeError::InsufficientAllowance
+        );
     }
 
     #[test]
@@ -1355,9 +1501,12 @@ mod tests {
         token_client.approve(&supporter, &donation_client.address, &1000, &1_000);
 
         env.ledger().with_mut(|li| li.timestamp = 2_000);
-        
+
         let result = donation_client.try_charge_subscription(&executor, &id);
-        assert_eq!(result.unwrap_err().unwrap(), ChargeError::InsufficientBalance);
+        assert_eq!(
+            result.unwrap_err().unwrap(),
+            ChargeError::InsufficientBalance
+        );
     }
 
     // --- charge_subscription edge cases ---------------------------------
@@ -1394,7 +1543,15 @@ mod tests {
             &allowance,
             &1_000,
         );
-        (admin, donation_client, supporter, creator, executor, token_address, id)
+        (
+            admin,
+            donation_client,
+            supporter,
+            creator,
+            executor,
+            token_address,
+            id,
+        )
     }
 
     #[test]
@@ -1408,11 +1565,13 @@ mod tests {
         env.ledger().with_mut(|li| li.timestamp = 2_000);
         donation_client.charge_subscription(&executor, &id);
 
-        assert_eq!(token::Client::new(&env, &token_address).balance(&creator), 500);
+        assert_eq!(
+            token::Client::new(&env, &token_address).balance(&creator),
+            500
+        );
     }
 
     #[test]
-    #[should_panic(expected = "subscription not yet due")]
     fn test_charge_subscription_cannot_charge_twice_in_one_period() {
         let env = Env::default();
         env.mock_all_auths_allowing_non_root_auth();
@@ -1422,7 +1581,8 @@ mod tests {
         env.ledger().with_mut(|li| li.timestamp = 2_000);
         donation_client.charge_subscription(&executor, &id);
         // Same ledger time: the schedule has moved to 3_000, so this must be rejected.
-        donation_client.charge_subscription(&executor, &id);
+        let res = donation_client.try_charge_subscription(&executor, &id);
+        assert_eq!(res.unwrap_err().unwrap(), DonationError::NotDue);
     }
 
     #[test]
@@ -1451,7 +1611,10 @@ mod tests {
 
         env.ledger().with_mut(|li| li.timestamp = 2_000);
         let result = donation_client.try_charge_subscription(&executor, &id);
-        assert_eq!(result.unwrap_err().unwrap(), ChargeError::InsufficientAllowance);
+        assert_eq!(
+            result.unwrap_err().unwrap(),
+            ChargeError::InsufficientAllowance
+        );
 
         // A failed attempt must not advance the schedule, so it can be retried
         // as soon as the supporter fixes their allowance.
@@ -1471,7 +1634,9 @@ mod tests {
             subscription_fixture(&env, 10_000, 100);
 
         env.ledger().with_mut(|li| li.timestamp = 2_000);
-        assert!(donation_client.try_charge_subscription(&executor, &id).is_err());
+        assert!(donation_client
+            .try_charge_subscription(&executor, &id)
+            .is_err());
 
         let token_client = token::Client::new(&env, &token_address);
         token_client.approve(&supporter, &donation_client.address, &500, &1_000);
@@ -1481,18 +1646,20 @@ mod tests {
     }
 
     #[test]
-    #[should_panic(expected = "subscription not found")]
     fn test_charge_subscription_rejects_unknown_subscription() {
         let env = Env::default();
         env.mock_all_auths_allowing_non_root_auth();
         let (_admin, donation_client, _supporter, _creator, executor, _token, _id) =
             subscription_fixture(&env, 10_000, 500);
 
-        donation_client.charge_subscription(&executor, &999);
+        let res = donation_client.try_charge_subscription(&executor, &999);
+        assert_eq!(
+            res.unwrap_err().unwrap(),
+            DonationError::SubscriptionNotFound
+        );
     }
 
     #[test]
-    #[should_panic(expected = "contract is currently paused")]
     fn test_charge_subscription_rejects_while_paused() {
         let env = Env::default();
         env.mock_all_auths_allowing_non_root_auth();
@@ -1501,11 +1668,11 @@ mod tests {
 
         donation_client.emergency_pause(&admin);
         env.ledger().with_mut(|li| li.timestamp = 2_000);
-        donation_client.charge_subscription(&executor, &id);
+        let res = donation_client.try_charge_subscription(&executor, &id);
+        assert_eq!(res.unwrap_err().unwrap(), DonationError::Paused);
     }
 
     #[test]
-    #[should_panic(expected = "Subscription amount must be positive")]
     fn test_subscribe_rejects_zero_amount() {
         let env = Env::default();
         env.mock_all_auths_allowing_non_root_auth();
@@ -1513,17 +1680,17 @@ mod tests {
         let token_address = create_token_contract(&env, &admin);
         donation_client.add_allowed_token(&token_address);
 
-        donation_client.subscribe(
+        let res = donation_client.try_subscribe(
             &Address::generate(&env),
             &Address::generate(&env),
             &token_address,
             &0,
             &1_000,
         );
+        assert_eq!(res.unwrap_err().unwrap(), DonationError::InvalidAmount);
     }
 
     #[test]
-    #[should_panic(expected = "Interval must be positive")]
     fn test_subscribe_rejects_zero_interval() {
         let env = Env::default();
         env.mock_all_auths_allowing_non_root_auth();
@@ -1531,13 +1698,14 @@ mod tests {
         let token_address = create_token_contract(&env, &admin);
         donation_client.add_allowed_token(&token_address);
 
-        donation_client.subscribe(
+        let res = donation_client.try_subscribe(
             &Address::generate(&env),
             &Address::generate(&env),
             &token_address,
             &500,
             &0,
         );
+        assert_eq!(res.unwrap_err().unwrap(), DonationError::InvalidInterval);
     }
 
     // =========================================================================
@@ -1630,7 +1798,10 @@ mod tests {
             assert_eq!(creator_received + record.fee_amount, record.amount);
 
             // Invariant 3: Balances update exactly by transferred amount
-            assert_eq!(token_client.balance(&donor), initial_donor_balance - donated_so_far);
+            assert_eq!(
+                token_client.balance(&donor),
+                initial_donor_balance - donated_so_far
+            );
             assert_eq!(token_client.balance(&creator), donated_so_far);
             // Invariant 4: No funds trapped in contract
             assert_eq!(token_client.balance(&donation_client.address), 0);
@@ -1652,15 +1823,18 @@ mod tests {
         // Without mock_all_auths on the unauthorized caller, privileged calls must fail
         assert!(std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
             donation_client.add_allowed_token(&random_token);
-        })).is_err());
+        }))
+        .is_err());
 
         assert!(std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
             donation_client.set_executor(&random_executor);
-        })).is_err());
+        }))
+        .is_err());
 
         assert!(std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
             donation_client.emergency_pause(&_unauthorized_caller);
-        })).is_err());
+        }))
+        .is_err());
     }
 
     #[test]
@@ -1684,7 +1858,8 @@ mod tests {
                 &0,
                 &String::from_bytes(&env, b"zero"),
             );
-        })).is_err());
+        }))
+        .is_err());
 
         // 2. Negative amount must panic
         assert!(std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
@@ -1695,7 +1870,8 @@ mod tests {
                 &-500,
                 &String::from_bytes(&env, b"negative"),
             );
-        })).is_err());
+        }))
+        .is_err());
 
         // 3. Memo exceeding MAX_MEMO_LENGTH (140 bytes) must panic
         let long_memo_bytes = [b'a'; 141];
@@ -1707,7 +1883,8 @@ mod tests {
                 &100,
                 &String::from_bytes(&env, &long_memo_bytes),
             );
-        })).is_err());
+        }))
+        .is_err());
 
         // 4. Exactly 140 bytes memo must succeed
         let max_valid_memo = [b'b'; 140];
@@ -1730,7 +1907,8 @@ mod tests {
                 &100,
                 &String::from_bytes(&env, b"unallowed"),
             );
-        })).is_err());
+        }))
+        .is_err());
     }
 
     use proptest::prelude::*;
@@ -1820,7 +1998,6 @@ mod tests {
     }
 
     #[test]
-    #[should_panic(expected = "next charge time overflow")]
     fn test_subscribe_interval_overflow_panics() {
         let env = Env::default();
         env.mock_all_auths_allowing_non_root_auth();
@@ -1832,7 +2009,9 @@ mod tests {
         donation_client.add_allowed_token(&token_address);
 
         env.ledger().with_mut(|li| li.timestamp = 1_000);
-        donation_client.subscribe(&supporter, &creator, &token_address, &100, &u64::MAX);
+        let res =
+            donation_client.try_subscribe(&supporter, &creator, &token_address, &100, &u64::MAX);
+        assert_eq!(res.unwrap_err().unwrap(), DonationError::Overflow);
     }
 
     #[test]
@@ -1859,12 +2038,20 @@ mod tests {
         donation_client.charge_subscription(&executor, &id);
 
         // The reschedule and the transfer land together.
-        assert_eq!(donation_client.get_subscription(&id).unwrap().next_charge_at, 3_500);
+        assert_eq!(
+            donation_client
+                .get_subscription(&id)
+                .unwrap()
+                .next_charge_at,
+            3_500
+        );
         assert_eq!(token_client.balance(&creator), 500);
 
         // A second charge in the same period is rejected because the new
         // schedule was already persisted.
-        assert!(donation_client.try_charge_subscription(&executor, &id).is_err());
+        assert!(donation_client
+            .try_charge_subscription(&executor, &id)
+            .is_err());
         assert_eq!(token_client.balance(&creator), 500);
     }
 
@@ -1889,8 +2076,73 @@ mod tests {
 
         env.ledger().with_mut(|li| li.timestamp = 2_000);
         let result = donation_client.try_charge_subscription(&executor, &id);
-        assert_eq!(result.unwrap_err().unwrap(), ChargeError::InsufficientBalance);
-        assert_eq!(donation_client.get_subscription(&id).unwrap().next_charge_at, 2_000);
+        assert_eq!(
+            result.unwrap_err().unwrap(),
+            ChargeError::InsufficientBalance
+        );
+        assert_eq!(
+            donation_client
+                .get_subscription(&id)
+                .unwrap()
+                .next_charge_at,
+            2_000
+        );
+    }
+
+    #[test]
+    fn test_donated_event_payload_for_donate_and_subscription() {
+        let env = Env::default();
+        env.mock_all_auths_allowing_non_root_auth();
+        let (admin, donation_client, _registry_client) = setup(&env);
+
+        let donor = Address::generate(&env);
+        let creator = Address::generate(&env);
+        let executor = Address::generate(&env);
+        let token_address = create_token_contract(&env, &admin);
+        donation_client.add_allowed_token(&token_address);
+        StellarAssetClient::new(&env, &token_address).mint(&donor, &10_000);
+
+        donation_client.set_executor(&executor);
+
+        // 1. One-off donation
+        donation_client.donate(
+            &donor,
+            &creator,
+            &token_address,
+            &300,
+            &String::from_bytes(&env, b"support"),
+        );
+
+        let events = env.events().all();
+        assert!(!events.is_empty());
+        let last_event = events.last().unwrap();
+        let event_data: DonatedEvent = last_event.data.into_val(&env);
+        assert_eq!(event_data.donation_id, 1);
+        assert_eq!(event_data.donor, donor);
+        assert_eq!(event_data.creator, creator);
+        assert_eq!(event_data.token, token_address);
+        assert_eq!(event_data.amount, 300);
+        assert_eq!(event_data.fee_amount, 0);
+        assert_eq!(event_data.subscription_id, None);
+
+        // 2. Subscription charge
+        env.ledger().with_mut(|li| li.timestamp = 1_000);
+        let sub_id = donation_client.subscribe(&donor, &creator, &token_address, &500, &1_000);
+        let token_client = token::Client::new(&env, &token_address);
+        token_client.approve(&donor, &donation_client.address, &500, &1_000);
+
+        env.ledger().with_mut(|li| li.timestamp = 2_000);
+        donation_client.charge_subscription(&executor, &sub_id);
+
+        let events = env.events().all();
+        let last_event = events.last().unwrap();
+        let sub_event_data: DonatedEvent = last_event.data.into_val(&env);
+        assert_eq!(sub_event_data.donation_id, 2);
+        assert_eq!(sub_event_data.donor, donor);
+        assert_eq!(sub_event_data.creator, creator);
+        assert_eq!(sub_event_data.token, token_address);
+        assert_eq!(sub_event_data.amount, 500);
+        assert_eq!(sub_event_data.fee_amount, 0);
+        assert_eq!(sub_event_data.subscription_id, Some(sub_id));
     }
 }
-

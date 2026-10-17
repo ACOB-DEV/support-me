@@ -1,0 +1,33 @@
+{
+  "network": "testnet",
+  "rpcUrl": "https://soroban-testnet.stellar.org",
+  "networkPassphrase": "Test SDF Network ; September 2015",
+  "deployedAt": "2026-10-17T18:00:00Z",
+  "admin": "GBBD47IF6LWK7P7MDEVSCWR7DPUWV3NY3DTQEVFL4NAT4AQH3ZLLFLA",
+  "executor": "GDONOR1234567890ABCDEF1234567890ABCDEF1234567890ABCDEF12",
+  "contracts": {
+    "donation": {
+      "id": "CAO2UABEB4A3EYFTWCMOSTFAUZ5FBSFRESQGWQHOLASZ3RHDCQHQG2LP",
+      "wasmHash": "d1357f88e734bc1a7a0b3f5cf7b7cf7a0c8402dbbf80cfb088b90c1f2e8cf3b4",
+      "deployTxHash": "768c35272723427c635a78e68930159b675b88f0f0ad8cf9f0e0b29be955c15f"
+    },
+    "creatorRegistry": {
+      "id": "CB6PH7KYI3UHAUNYIJVCV7CT6BOBROLSR4LSZB3WSGFOYOW6JFAF5NDU",
+      "wasmHash": "a90b42c4b819f3900be46cfc37e6da481541dbe7264879fa1e2b027ca8e0f6c2",
+      "deployTxHash": "804cf80669333df32713d6297e806a7b09b0583cd2c98646315611656d1914b4"
+    }
+  },
+  "tokens": {
+    "XLM": {
+      "code": "XLM",
+      "sacContractId": "CDLZFC3SYJYDZT7K67VZ75HPJVIEUVNIXF47ZG2FB2RMQQVU2HHGCYSC",
+      "allowed": true
+    },
+    "USDC": {
+      "code": "USDC",
+      "issuer": "GBBD47IF6LWK7P7MDEVSCWR7DPUWV3NY3DTQEVFL4NAT4AQH3ZLLFLA",
+      "sacContractId": "CBIELTK6YBZJU5UP2WWQEUCYJLPU6QXN5J2BRNWPGSR7D7K4F3U7XOP7",
+      "allowed": true
+    }
+  }
+}

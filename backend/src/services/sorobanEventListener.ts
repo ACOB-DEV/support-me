@@ -14,14 +14,18 @@ import {
   eventBus,
 } from "./eventBus";
 
-const RPC_URL = process.env.SOROBAN_RPC_URL || "https://soroban-testnet.stellar.org";
+const RPC_URL =
+  process.env.SOROBAN_RPC_URL || "https://soroban-testnet.stellar.org";
 const DONATION_CONTRACT_ID = process.env.NEXT_PUBLIC_DONATION_CONTRACT_ID;
-const CREATOR_REGISTRY_CONTRACT_ID = process.env.NEXT_PUBLIC_CREATOR_REGISTRY_CONTRACT_ID;
-const POLL_INTERVAL_MS = Number(process.env.SOROBAN_EVENTS_POLL_INTERVAL_MS) || 5000;
+const CREATOR_REGISTRY_CONTRACT_ID =
+  process.env.NEXT_PUBLIC_CREATOR_REGISTRY_CONTRACT_ID;
+const POLL_INTERVAL_MS =
+  Number(process.env.SOROBAN_EVENTS_POLL_INTERVAL_MS) || 5000;
 // How far back to look for events the first time the listener starts, so a
 // freshly-restarted backend still surfaces recent events instead of only
 // ones that happen after this exact moment.
-const LOOKBACK_LEDGERS = Number(process.env.SOROBAN_EVENTS_LOOKBACK_LEDGERS) || 100;
+const LOOKBACK_LEDGERS =
+  Number(process.env.SOROBAN_EVENTS_LOOKBACK_LEDGERS) || 100;
 
 export interface RawEvent {
   type: string;
@@ -36,13 +40,19 @@ export function decodeScVal(base64Xdr: string): unknown {
   return scValToNative(xdr.ScVal.fromXDR(base64Xdr, "base64"));
 }
 
-async function rpcCall<T>(method: string, params: Record<string, unknown>): Promise<T> {
+async function rpcCall<T>(
+  method: string,
+  params: Record<string, unknown>,
+): Promise<T> {
   const response = await fetch(RPC_URL, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify({ jsonrpc: "2.0", id: 1, method, params }),
   });
-  const body = (await response.json()) as { result?: T; error?: { message: string } };
+  const body = (await response.json()) as {
+    result?: T;
+    error?: { message: string };
+  };
   if (body.error) {
     throw new Error(`Soroban RPC ${method} failed: ${body.error.message}`);
   }
@@ -65,7 +75,7 @@ export class SorobanEventListener {
   start(): void {
     if (!DONATION_CONTRACT_ID) {
       console.warn(
-        "SorobanEventListener: NEXT_PUBLIC_DONATION_CONTRACT_ID is not set, skipping event polling."
+        "SorobanEventListener: NEXT_PUBLIC_DONATION_CONTRACT_ID is not set, skipping event polling.",
       );
       return;
     }
@@ -78,7 +88,7 @@ export class SorobanEventListener {
     console.log(
       `SorobanEventListener: polling ${RPC_URL} for contracts [${DONATION_CONTRACT_ID}${
         CREATOR_REGISTRY_CONTRACT_ID ? `, ${CREATOR_REGISTRY_CONTRACT_ID}` : ""
-      }] every ${POLL_INTERVAL_MS}ms`
+      }] every ${POLL_INTERVAL_MS}ms`,
     );
   }
 
@@ -104,21 +114,55 @@ export class SorobanEventListener {
       case "donated": {
         const value = decodeScVal(evt.value) as {
           amount: bigint;
-          memo: string;
+          memo?: string;
           timestamp: bigint;
           token?: string;
+          donation_id?: bigint | number;
+          fee_amount?: bigint;
+          subscription_id?: bigint | number | null;
         };
+
+        const donationId =
+          value.donation_id != null ? Number(value.donation_id) : undefined;
+        const feeAmount =
+          value.fee_amount != null ? value.fee_amount.toString() : undefined;
+        const subId =
+          value.subscription_id != null
+            ? Number(value.subscription_id)
+            : undefined;
 
         const payload: DonationEvent = {
           donor: topics[1] as string,
           creator: topics[2] as string,
           token: value.token ? String(value.token) : undefined,
           amount: value.amount.toString(),
-          memo: value.memo,
+          memo: value.memo || "",
           timestamp: Number(value.timestamp),
           ledger: evt.ledger,
           txHash: evt.txHash,
+          donationId,
+          feeAmount,
+          subscriptionId: subId,
         };
+
+        if (subId != null) {
+          try {
+            await prisma.subscription.updateMany({
+              where: { onChainId: subId },
+              data: {
+                lastChargeTxHash: evt.txHash,
+                lastChargedAt: new Date(Number(value.timestamp) * 1000),
+                lastError: null,
+                failureCount: 0,
+              },
+            });
+          } catch (err) {
+            console.error(
+              `Failed to reconcile subscription ${subId} on donation event:`,
+              err,
+            );
+          }
+        }
 
         eventBus.emit(DONATION_EVENT, payload);
         return true;
@@ -176,7 +220,7 @@ export class SorobanEventListener {
         } catch (err) {
           console.error(
             `SorobanEventListener: error reconciling cancelled subscription #${subId}:`,
-            (err as Error).message
+            (err as Error).message,
           );
         }
         return true;
@@ -211,7 +255,7 @@ export class SorobanEventListener {
         } catch (err) {
           console.error(
             `SorobanEventListener: error reconciling creator goal for ${creatorAddress}:`,
-            (err as Error).message
+            (err as Error).message,
           );
         }
         return true;
@@ -261,7 +305,7 @@ export class SorobanEventListener {
       } else {
         const { sequence: latestLedger } = await rpcCall<{ sequence: number }>(
           "getLatestLedger",
-          {}
+          {},
         );
         params.startLedger = Math.max(latestLedger - LOOKBACK_LEDGERS, 1);
       }
@@ -276,7 +320,10 @@ export class SorobanEventListener {
         this.cursor = result.events[result.events.length - 1].id;
       }
     } catch (error) {
-      console.error("SorobanEventListener: poll failed:", (error as Error).message);
+      console.error(
+        "SorobanEventListener: poll failed:",
+        (error as Error).message,
+      );
     } finally {
       this.polling = false;
     }

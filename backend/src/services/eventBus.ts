@@ -12,6 +12,9 @@ export interface DonationEvent {
   /** Stable RPC event identity, when supplied by the listener. */
   eventId?: string;
   currency?: string;
+  donationId?: number;
+  subscriptionId?: number;
+  feeAmount?: string;
 }
 
 export interface SubscriptionCreatedEvent {

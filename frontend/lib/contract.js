@@ -1,10 +1,11 @@
-import * as StellarSdk from '@stellar/stellar-sdk';
-import { signTransaction as signWithWallet } from './wallet';
-import { sacContractId } from './assets';
-import { reportRetry, withRetry } from './retry';
+import * as StellarSdk from "@stellar/stellar-sdk";
+import { signTransaction as signWithWallet } from "./wallet";
+import { sacContractId } from "./assets";
+import { reportRetry, withRetry } from "./retry";
 
 const RPC_URL =
-  process.env.NEXT_PUBLIC_SOROBAN_RPC_URL || 'https://soroban-testnet.stellar.org';
+  process.env.NEXT_PUBLIC_SOROBAN_RPC_URL ||
+  "https://soroban-testnet.stellar.org";
 const CONTRACT_ID = process.env.NEXT_PUBLIC_DONATION_CONTRACT_ID;
 const NETWORK_PASSPHRASE = StellarSdk.Networks.TESTNET;
 // Stellar's network targets a ~5s ledger close time; used only to translate
@@ -18,7 +19,7 @@ const APPROX_SECONDS_PER_LEDGER = 5;
 export const MAX_TTL_LEDGERS = 3_110_400;
 export const MAX_MEMO_LENGTH = 140;
 export const MAX_CHARGE_INTERVAL_DAYS = Math.floor(
-  (MAX_TTL_LEDGERS * APPROX_SECONDS_PER_LEDGER) / 86400
+  (MAX_TTL_LEDGERS * APPROX_SECONDS_PER_LEDGER) / 86400,
 );
 
 const server = new StellarSdk.rpc.Server(RPC_URL);
@@ -29,15 +30,115 @@ const server = new StellarSdk.rpc.Server(RPC_URL);
 const CONFIRMATION_WINDOW_MS = 30_000;
 const CONFIRMATION_POLL_MS = 1_500;
 
+export const CHARGE_ERRORS = {
+  1: "Insufficient allowance to charge subscription.",
+  2: "Supporter has insufficient balance.",
+};
+
+export const CONTRACT_ERRORS = {
+  1: "Insufficient allowance to charge subscription.",
+  2: "Supporter has insufficient balance.",
+  3: "Contract is not initialized.",
+  4: "Contract is already initialized.",
+  5: "Contract is currently paused.",
+  6: "Caller is not authorized.",
+  7: "This token is not in the allowlist.",
+  8: "Donation memo exceeds maximum length.",
+  9: "Donation amount is below the minimum limit.",
+  10: "Donation amount exceeds the maximum limit.",
+  11: "Subscription is not due for renewal yet.",
+  12: "Subscription is not active.",
+  13: "Subscription not found.",
+  14: "Invalid donation or subscription amount.",
+  15: "Subscription interval must be positive.",
+  16: "Invalid threshold: must be between 1 and the number of admins.",
+  17: "Admin list cannot be empty.",
+  18: "Admin proposal not found.",
+  19: "Admin proposal has already been executed.",
+  20: "Admin has already approved this proposal.",
+  21: "Timelock has not elapsed yet.",
+  22: "Threshold exceeds the number of admins.",
+  23: "Cannot remove all admins.",
+  24: "Multi-sig authorization required for this action.",
+  25: "Contract executor is not configured.",
+  26: "Arithmetic overflow or underflow.",
+  27: "Admin threshold is invalid.",
+};
+
+export const REGISTRY_ERRORS = {
+  1: "Registry is not initialized.",
+  2: "Registry is already initialized.",
+  3: "Caller is not authorized.",
+  4: "Creator is already registered.",
+  5: "Invalid amount.",
+  6: "Invalid threshold.",
+  7: "Admin list cannot be empty.",
+  8: "Admin proposal not found.",
+  9: "Admin proposal has already been executed.",
+  10: "Admin has already approved this proposal.",
+  11: "Timelock has not elapsed yet.",
+  12: "Threshold exceeds the number of admins.",
+  13: "Cannot remove all admins.",
+  14: "Multi-sig authorization required.",
+  15: "Caller is not authorized to perform this action.",
+  16: "Invalid creator goal amount.",
+  17: "Arithmetic overflow or underflow in registry.",
+};
+
+/**
+ * Parses raw error messages, simulation errors, or transaction errors for Soroban Error(Contract, #N)
+ * and returns user-friendly messages for known contract error codes.
+ */
+export function parseContractError(err) {
+  if (!err) return null;
+  const rawMsg =
+    typeof err === "string" ? err : err.message || JSON.stringify(err);
+
+  // Match Error(Contract, #N) or Error(Contract, N) or Error(Wasm, ...)
+  const match = rawMsg.match(/Error\(Contract,\s*#?([0-9]+)\)/i);
+  if (match) {
+    const code = parseInt(match[1], 10);
+    if (CONTRACT_ERRORS[code]) {
+      return CONTRACT_ERRORS[code];
+    }
+  }
+
+  // Common pattern checks
+  if (/insufficient balance/i.test(rawMsg)) {
+    return "Insufficient balance to complete this transaction.";
+  }
+  if (/insufficient allowance/i.test(rawMsg)) {
+    return "Insufficient allowance. Please approve the token transfer.";
+  }
+  if (/contract is currently paused|paused/i.test(rawMsg)) {
+    return "The contract is currently paused by admin.";
+  }
+  if (/token is not in the allowlist|not allowed/i.test(rawMsg)) {
+    return "This token is not accepted for donations.";
+  }
+  if (/memo exceeds maximum length/i.test(rawMsg)) {
+    return `Message exceeds maximum length of ${MAX_MEMO_LENGTH} bytes.`;
+  }
+  if (/amount (is below|too low)/i.test(rawMsg)) {
+    return "Donation amount is below minimum limit.";
+  }
+  if (/amount (exceeds|too high)/i.test(rawMsg)) {
+    return "Donation amount exceeds maximum limit.";
+  }
+
+  return null;
+}
+
 // Error types the UI can distinguish between:
 // - 'wallet'     wallet not connected / user rejected or failed to sign
 // - 'simulation' bad input, insufficient balance, contract precondition failure
 // - 'network'    RPC/network unreachable, submission or confirmation failure
 export class DonationError extends Error {
-  constructor(type, message, cause) {
+  constructor(type, message, cause, code) {
     super(message);
     this.type = type;
     this.cause = cause;
+    this.code = code;
   }
 }
 
@@ -53,7 +154,10 @@ export class DonationError extends Error {
 function toStroops(amount, multiplier = 1) {
   const value = parseFloat(amount);
   if (!Number.isFinite(value) || value <= 0) {
-    throw new DonationError('simulation', 'Enter a valid amount greater than 0.');
+    throw new DonationError(
+      "simulation",
+      "Enter a valid amount greater than 0.",
+    );
   }
   return BigInt(Math.round(value * multiplier * 1e7));
 }
@@ -72,24 +176,30 @@ function toStroops(amount, multiplier = 1) {
  * @param {(status: string) => void} [params.onStatus]
  * @returns {Promise<{ hash: string, returnValue: unknown }>}
  */
-async function callContract({ contractId = CONTRACT_ID, method, args, signerAddress, onStatus }) {
+async function callContract({
+  contractId = CONTRACT_ID,
+  method,
+  args,
+  signerAddress,
+  onStatus,
+}) {
   if (!contractId) {
     throw new DonationError(
-      'simulation',
-      'Donation contract is not configured (missing NEXT_PUBLIC_DONATION_CONTRACT_ID).'
+      "simulation",
+      "Donation contract is not configured (missing NEXT_PUBLIC_DONATION_CONTRACT_ID).",
     );
   }
 
-  onStatus?.('building');
+  onStatus?.("building");
 
   let account;
   try {
     account = await server.getAccount(signerAddress);
   } catch (err) {
     throw new DonationError(
-      'network',
-      'Could not load your account from the Stellar network. Check your connection and try again.',
-      err
+      "network",
+      "Could not load your account from the Stellar network. Check your connection and try again.",
+      err,
     );
   }
 
@@ -105,40 +215,48 @@ async function callContract({ contractId = CONTRACT_ID, method, args, signerAddr
       .setTimeout(60)
       .build();
   } catch (err) {
-    throw new DonationError('simulation', `Failed to build the ${method} transaction.`, err);
+    throw new DonationError(
+      "simulation",
+      `Failed to build the ${method} transaction.`,
+      err,
+    );
   }
 
-  onStatus?.('simulating');
+  onStatus?.("simulating");
 
   let prepared;
   try {
     prepared = await server.prepareTransaction(tx);
   } catch (err) {
-    const message = /insufficient|underfunded/i.test(err?.message || '')
-      ? 'Insufficient balance or allowance to complete this action.'
-      : err?.message || 'The transaction could not be simulated. Check the amount and try again.';
-    throw new DonationError('simulation', message, err);
+    const parsed = parseContractError(err);
+    const message = parsed
+      ? parsed
+      : /insufficient|underfunded/i.test(err?.message || "")
+        ? "Insufficient balance or allowance to complete this action."
+        : err?.message ||
+          "The transaction could not be simulated. Check the amount and try again.";
+    throw new DonationError("simulation", message, err);
   }
 
-  onStatus?.('awaiting-signature');
+  onStatus?.("awaiting-signature");
 
   let signedResult;
   try {
     signedResult = await signWithWallet(prepared.toXDR(), signerAddress);
   } catch (err) {
     throw new DonationError(
-      'wallet',
-      'Signing was cancelled or failed. Please approve the transaction in your wallet.',
-      err
+      "wallet",
+      "Signing was cancelled or failed. Please approve the transaction in your wallet.",
+      err,
     );
   }
 
   const signedTx = StellarSdk.TransactionBuilder.fromXDR(
     signedResult.signedTxXdr,
-    NETWORK_PASSPHRASE
+    NETWORK_PASSPHRASE,
   );
 
-  onStatus?.('submitting');
+  onStatus?.("submitting");
 
   let sendResponse;
   try {
@@ -146,47 +264,66 @@ async function callContract({ contractId = CONTRACT_ID, method, args, signerAddr
     // transaction is already signed and has a fixed hash, so a retry is a
     // no-op on any node that accepted the first attempt, and a genuine
     // recovery on a node that dropped it. A contract revert is not retried.
-    sendResponse = await withRetry('sendTransaction', () => server.sendTransaction(signedTx), {
-      onRetry: reportRetry,
-    });
+    sendResponse = await withRetry(
+      "sendTransaction",
+      () => server.sendTransaction(signedTx),
+      {
+        onRetry: reportRetry,
+      },
+    );
   } catch (err) {
-    throw new DonationError('network', 'Failed to submit the transaction to the network.', err);
+    throw new DonationError(
+      "network",
+      "Failed to submit the transaction to the network.",
+      err,
+    );
   }
 
-  if (sendResponse.status === 'ERROR') {
-    throw new DonationError('network', 'The network rejected the transaction.', sendResponse);
+  if (sendResponse.status === "ERROR") {
+    throw new DonationError(
+      "network",
+      "The network rejected the transaction.",
+      sendResponse,
+    );
   }
 
-  onStatus?.('pending');
+  onStatus?.("pending");
 
   const hash = sendResponse.hash;
   const readTransaction = () =>
-    withRetry('getTransaction', () => server.getTransaction(hash), { onRetry: reportRetry });
+    withRetry("getTransaction", () => server.getTransaction(hash), {
+      onRetry: reportRetry,
+    });
 
   let getResponse = await readTransaction();
   const start = Date.now();
-  while (getResponse.status === 'NOT_FOUND' && Date.now() - start < CONFIRMATION_WINDOW_MS) {
+  while (
+    getResponse.status === "NOT_FOUND" &&
+    Date.now() - start < CONFIRMATION_WINDOW_MS
+  ) {
     await new Promise((resolve) => setTimeout(resolve, CONFIRMATION_POLL_MS));
     getResponse = await readTransaction();
   }
 
-  if (getResponse.status === 'SUCCESS') {
-    onStatus?.('success');
+  if (getResponse.status === "SUCCESS") {
+    onStatus?.("success");
     const returnValue = getResponse.returnValue
       ? StellarSdk.scValToNative(getResponse.returnValue)
       : undefined;
     return { hash, returnValue };
   }
 
-  if (getResponse.status === 'NOT_FOUND') {
+  if (getResponse.status === "NOT_FOUND") {
     throw new DonationError(
-      'network',
-      'Timed out waiting for confirmation. Check Stellar Explorer for the latest status.',
-      { hash }
+      "network",
+      "Timed out waiting for confirmation. Check Stellar Explorer for the latest status.",
+      { hash },
     );
   }
 
-  throw new DonationError('network', 'Transaction failed on the network.', getResponse);
+  const parsedMsg =
+    parseContractError(getResponse) || "Transaction failed on the network.";
+  throw new DonationError("network", parsedMsg, getResponse);
 }
 
 /**
@@ -203,31 +340,51 @@ async function callContract({ contractId = CONTRACT_ID, method, args, signerAddr
  *   'building' | 'simulating' | 'awaiting-signature' | 'submitting' | 'pending' | 'success'
  * @returns {Promise<{ hash: string }>}
  */
-export async function sendDonation({ donorAddress, creatorAddress, amount, assetCode = 'XLM', memo, onStatus }) {
-  if (typeof window !== 'undefined' && window.__SUPPORTME_MOCK_CONTRACT__?.sendDonation) {
-    return window.__SUPPORTME_MOCK_CONTRACT__.sendDonation({ donorAddress, creatorAddress, amount, assetCode, memo, onStatus });
+export async function sendDonation({
+  donorAddress,
+  creatorAddress,
+  amount,
+  assetCode = "XLM",
+  memo,
+  onStatus,
+}) {
+  if (
+    typeof window !== "undefined" &&
+    window.__SUPPORTME_MOCK_CONTRACT__?.sendDonation
+  ) {
+    return window.__SUPPORTME_MOCK_CONTRACT__.sendDonation({
+      donorAddress,
+      creatorAddress,
+      amount,
+      assetCode,
+      memo,
+      onStatus,
+    });
   }
-  const memoValue = memo || '';
+  const memoValue = memo || "";
   if (new TextEncoder().encode(memoValue).length > MAX_MEMO_LENGTH) {
-    throw new DonationError('simulation', `Message must be ${MAX_MEMO_LENGTH} bytes or fewer.`);
+    throw new DonationError(
+      "simulation",
+      `Message must be ${MAX_MEMO_LENGTH} bytes or fewer.`,
+    );
   }
   let tokenId;
   try {
     tokenId = sacContractId(assetCode);
   } catch (err) {
-    throw new DonationError('simulation', err.message, err);
+    throw new DonationError("simulation", err.message, err);
   }
   const amountStroops = toStroops(amount);
 
   const { hash } = await callContract({
-    method: 'donate',
+    method: "donate",
     signerAddress: donorAddress,
     args: [
-      StellarSdk.nativeToScVal(donorAddress, { type: 'address' }),
-      StellarSdk.nativeToScVal(creatorAddress, { type: 'address' }),
-      StellarSdk.nativeToScVal(tokenId, { type: 'address' }),
-      StellarSdk.nativeToScVal(amountStroops, { type: 'i128' }),
-      StellarSdk.nativeToScVal(memoValue, { type: 'string' }),
+      StellarSdk.nativeToScVal(donorAddress, { type: "address" }),
+      StellarSdk.nativeToScVal(creatorAddress, { type: "address" }),
+      StellarSdk.nativeToScVal(tokenId, { type: "address" }),
+      StellarSdk.nativeToScVal(amountStroops, { type: "i128" }),
+      StellarSdk.nativeToScVal(memoValue, { type: "string" }),
     ],
     onStatus,
   });
@@ -257,42 +414,60 @@ export async function sendDonation({ donorAddress, creatorAddress, amount, asset
 export async function approveAllowance({
   supporterAddress,
   amount,
-  assetCode = 'XLM',
+  assetCode = "XLM",
   intervalSecs,
   periodsToApprove = 12,
   onStatus,
 }) {
-  if (typeof window !== 'undefined' && window.__SUPPORTME_MOCK_CONTRACT__?.approveAllowance) {
-    return window.__SUPPORTME_MOCK_CONTRACT__.approveAllowance({ supporterAddress, amount, assetCode, intervalSecs, periodsToApprove, onStatus });
+  if (
+    typeof window !== "undefined" &&
+    window.__SUPPORTME_MOCK_CONTRACT__?.approveAllowance
+  ) {
+    return window.__SUPPORTME_MOCK_CONTRACT__.approveAllowance({
+      supporterAddress,
+      amount,
+      assetCode,
+      intervalSecs,
+      periodsToApprove,
+      onStatus,
+    });
   }
   let tokenId;
   try {
     tokenId = sacContractId(assetCode);
   } catch (err) {
-    throw new DonationError('simulation', err.message, err);
+    throw new DonationError("simulation", err.message, err);
   }
   if (!CONTRACT_ID) {
     throw new DonationError(
-      'simulation',
-      'Donation contract is not configured (missing NEXT_PUBLIC_DONATION_CONTRACT_ID).'
+      "simulation",
+      "Donation contract is not configured (missing NEXT_PUBLIC_DONATION_CONTRACT_ID).",
     );
   }
 
   const maxTtlSeconds = MAX_TTL_LEDGERS * APPROX_SECONDS_PER_LEDGER;
   if (intervalSecs > maxTtlSeconds) {
     throw new DonationError(
-      'simulation',
-      `The charge interval is too long — Stellar allows at most ${MAX_CHARGE_INTERVAL_DAYS} days between charges.`
+      "simulation",
+      `The charge interval is too long — Stellar allows at most ${MAX_CHARGE_INTERVAL_DAYS} days between charges.`,
     );
   }
 
   let latestLedger;
   try {
-    ({ sequence: latestLedger } = await withRetry('getLatestLedger', () => server.getLatestLedger(), {
-      onRetry: reportRetry,
-    }));
+    ({ sequence: latestLedger } = await withRetry(
+      "getLatestLedger",
+      () => server.getLatestLedger(),
+      {
+        onRetry: reportRetry,
+      },
+    ));
   } catch (err) {
-    throw new DonationError('network', 'Could not read the current ledger from the network.', err);
+    throw new DonationError(
+      "network",
+      "Could not read the current ledger from the network.",
+      err,
+    );
   }
 
   // Never pre-approve further out than the network's max TTL, even if that
@@ -301,18 +476,19 @@ export async function approveAllowance({
   const periodsApproved = Math.max(1, Math.min(periodsToApprove, maxPeriods));
 
   const expirationLedger =
-    latestLedger + Math.ceil((intervalSecs * periodsApproved) / APPROX_SECONDS_PER_LEDGER);
+    latestLedger +
+    Math.ceil((intervalSecs * periodsApproved) / APPROX_SECONDS_PER_LEDGER);
   const amountStroops = toStroops(amount, periodsApproved);
 
   const { hash } = await callContract({
     contractId: tokenId,
-    method: 'approve',
+    method: "approve",
     signerAddress: supporterAddress,
     args: [
-      StellarSdk.nativeToScVal(supporterAddress, { type: 'address' }),
-      StellarSdk.nativeToScVal(CONTRACT_ID, { type: 'address' }),
-      StellarSdk.nativeToScVal(amountStroops, { type: 'i128' }),
-      StellarSdk.nativeToScVal(expirationLedger, { type: 'u32' }),
+      StellarSdk.nativeToScVal(supporterAddress, { type: "address" }),
+      StellarSdk.nativeToScVal(CONTRACT_ID, { type: "address" }),
+      StellarSdk.nativeToScVal(amountStroops, { type: "i128" }),
+      StellarSdk.nativeToScVal(expirationLedger, { type: "u32" }),
     ],
     onStatus,
   });
@@ -339,35 +515,48 @@ export async function subscribe({
   supporterAddress,
   creatorAddress,
   amount,
-  assetCode = 'XLM',
+  assetCode = "XLM",
   intervalSecs,
   onStatus,
 }) {
-  if (typeof window !== 'undefined' && window.__SUPPORTME_MOCK_CONTRACT__?.subscribe) {
-    return window.__SUPPORTME_MOCK_CONTRACT__.subscribe({ supporterAddress, creatorAddress, amount, assetCode, intervalSecs, onStatus });
+  if (
+    typeof window !== "undefined" &&
+    window.__SUPPORTME_MOCK_CONTRACT__?.subscribe
+  ) {
+    return window.__SUPPORTME_MOCK_CONTRACT__.subscribe({
+      supporterAddress,
+      creatorAddress,
+      amount,
+      assetCode,
+      intervalSecs,
+      onStatus,
+    });
   }
   let tokenId;
   try {
     tokenId = sacContractId(assetCode);
   } catch (err) {
-    throw new DonationError('simulation', err.message, err);
+    throw new DonationError("simulation", err.message, err);
   }
   const amountStroops = toStroops(amount);
 
   const { hash, returnValue } = await callContract({
-    method: 'subscribe',
+    method: "subscribe",
     signerAddress: supporterAddress,
     args: [
-      StellarSdk.nativeToScVal(supporterAddress, { type: 'address' }),
-      StellarSdk.nativeToScVal(creatorAddress, { type: 'address' }),
-      StellarSdk.nativeToScVal(tokenId, { type: 'address' }),
-      StellarSdk.nativeToScVal(amountStroops, { type: 'i128' }),
-      StellarSdk.nativeToScVal(BigInt(intervalSecs), { type: 'u64' }),
+      StellarSdk.nativeToScVal(supporterAddress, { type: "address" }),
+      StellarSdk.nativeToScVal(creatorAddress, { type: "address" }),
+      StellarSdk.nativeToScVal(tokenId, { type: "address" }),
+      StellarSdk.nativeToScVal(amountStroops, { type: "i128" }),
+      StellarSdk.nativeToScVal(BigInt(intervalSecs), { type: "u64" }),
     ],
     onStatus,
   });
 
-  return { hash, subscriptionId: returnValue != null ? Number(returnValue) : undefined };
+  return {
+    hash,
+    subscriptionId: returnValue != null ? Number(returnValue) : undefined,
+  };
 }
 
 /**
@@ -381,16 +570,27 @@ export async function subscribe({
  * @param {(status: string) => void} [params.onStatus]
  * @returns {Promise<{ hash: string }>}
  */
-export async function cancelSubscription({ supporterAddress, subscriptionId, onStatus }) {
-  if (typeof window !== 'undefined' && window.__SUPPORTME_MOCK_CONTRACT__?.cancelSubscription) {
-    return window.__SUPPORTME_MOCK_CONTRACT__.cancelSubscription({ supporterAddress, subscriptionId, onStatus });
+export async function cancelSubscription({
+  supporterAddress,
+  subscriptionId,
+  onStatus,
+}) {
+  if (
+    typeof window !== "undefined" &&
+    window.__SUPPORTME_MOCK_CONTRACT__?.cancelSubscription
+  ) {
+    return window.__SUPPORTME_MOCK_CONTRACT__.cancelSubscription({
+      supporterAddress,
+      subscriptionId,
+      onStatus,
+    });
   }
   const { hash } = await callContract({
-    method: 'cancel_subscription',
+    method: "cancel_subscription",
     signerAddress: supporterAddress,
     args: [
-      StellarSdk.nativeToScVal(supporterAddress, { type: 'address' }),
-      StellarSdk.nativeToScVal(BigInt(subscriptionId), { type: 'u64' }),
+      StellarSdk.nativeToScVal(supporterAddress, { type: "address" }),
+      StellarSdk.nativeToScVal(BigInt(subscriptionId), { type: "u64" }),
     ],
     onStatus,
   });

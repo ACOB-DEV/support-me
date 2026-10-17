@@ -172,9 +172,79 @@ Data: (creator_address, username)
 
 ### Donated Event
 ```
-Emitted when donation is made
-Data: (donor_address, creator_address, amount, memo, timestamp, token_address)
+Emitted when donation or subscription charge is made
+Data: DonatedEvent {
+    donor: Address,
+    creator: Address,
+    token: Address,
+    amount: i128,
+    memo: String,
+    timestamp: u64,
+    donation_id: u32,
+    fee_amount: i128,
+    subscription_id: Option<u64>,
+}
 ```
+
+## Error Codes
+
+The contracts use typed, discriminant-backed errors instead of untyped panics:
+
+### `ChargeError` (`contracts/donation`)
+| Code | Error Variant | Description |
+|---|---|---|
+| 1 | `InsufficientAllowance` | Spender allowance insufficient to complete subscription charge |
+| 2 | `InsufficientBalance` | Supporter balance insufficient to complete subscription charge |
+
+### `DonationError` (`contracts/donation`)
+| Code | Error Variant | Description |
+|---|---|---|
+| 3 | `NotInitialized` | Contract has not been initialized |
+| 4 | `AlreadyInitialized` | Contract already initialized |
+| 5 | `Paused` | Contract is currently paused |
+| 6 | `Unauthorized` | Caller lacks authorization for operation |
+| 7 | `TokenNotAllowed` | Token is not in allowlist |
+| 8 | `MemoTooLong` | Memo exceeds maximum allowed length |
+| 9 | `AmountTooLow` | Donation amount is below configured minimum |
+| 10 | `AmountTooHigh` | Donation amount exceeds configured maximum |
+| 11 | `NotDue` | Subscription is not yet due for charge |
+| 12 | `SubscriptionNotActive` | Subscription is cancelled or inactive |
+| 13 | `SubscriptionNotFound` | Subscription ID does not exist |
+| 14 | `InvalidAmount` | Amount must be positive |
+| 15 | `InvalidInterval` | Interval must be positive |
+| 16 | `InvalidThreshold` | Multi-sig threshold is invalid |
+| 17 | `EmptyAdminList` | Admin list cannot be empty |
+| 18 | `ProposalNotFound` | Multi-sig proposal does not exist |
+| 19 | `ProposalAlreadyExecuted` | Multi-sig proposal already executed |
+| 20 | `AlreadyApproved` | Admin already approved proposal |
+| 21 | `TimelockNotElapsed` | Multi-sig timelock has not passed |
+| 22 | `ThresholdExceedsAdmins` | Multi-sig threshold exceeds admin count |
+| 23 | `CannotRemoveAllAdmins` | Removal would leave zero admins |
+| 24 | `MultiSigRequired` | Action requires multi-sig proposal |
+| 25 | `ExecutorNotSet` | Contract executor is not set |
+| 26 | `Overflow` | Numeric overflow or underflow |
+| 27 | `InvalidGoal` | Invalid creator goal amount |
+
+### `RegistryError` (`contracts/creator-registry`)
+| Code | Error Variant | Description |
+|---|---|---|
+| 1 | `NotInitialized` | Registry is not initialized |
+| 2 | `AlreadyInitialized` | Registry already initialized |
+| 3 | `Unauthorized` | Caller lacks authorization |
+| 4 | `AlreadyRegistered` | Creator is already registered |
+| 5 | `InvalidAmount` | Invalid amount |
+| 6 | `InvalidThreshold` | Multi-sig threshold is invalid |
+| 7 | `EmptyAdminList` | Admin list cannot be empty |
+| 8 | `ProposalNotFound` | Multi-sig proposal does not exist |
+| 9 | `ProposalAlreadyExecuted` | Multi-sig proposal already executed |
+| 10 | `AlreadyApproved` | Admin already approved proposal |
+| 11 | `TimelockNotElapsed` | Multi-sig timelock has not passed |
+| 12 | `ThresholdExceedsAdmins` | Multi-sig threshold exceeds admin count |
+| 13 | `CannotRemoveAllAdmins` | Removal would leave zero admins |
+| 14 | `MultiSigRequired` | Action requires multi-sig proposal |
+| 15 | `CallerNotAuthorized` | Caller not authorized for registry action |
+| 16 | `InvalidGoal` | Invalid goal amount |
+| 17 | `Overflow` | Arithmetic overflow |
 
 ## Security Considerations
 

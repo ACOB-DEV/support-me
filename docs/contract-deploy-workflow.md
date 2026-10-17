@@ -114,6 +114,38 @@ call is only available for a 1-of-1 contract.
    a subscription through a non-production frontend. Check the transaction on
    stellar.expert and confirm the backend event listener indexes it.
 
+## Automated Deployment Scripts & Token Allowlist Setup
+
+SupportMe includes helper scripts and targets to automate contract builds, deployment, cross-initialization, and token allowlist configuration:
+
+### 1. Deploying Contracts to Testnet
+Use `scripts/deploy-testnet.sh` (or `make deploy-testnet`):
+
+```bash
+# Deploys wasm contracts, initializes them with cross-references, registers executor,
+# and updates deployments/testnet.json:
+make deploy-testnet
+
+# Or generate fresh keys and deploy:
+bash scripts/deploy-testnet.sh --fresh-keys
+```
+
+This updates `deployments/testnet.json` with the deployed contract IDs, wasm hashes, network parameters, and admin/executor addresses.
+
+### 2. Token Allowlist Configuration
+Use `scripts/testnet-setup-tokens.sh` (or `make setup-tokens`):
+
+```bash
+make setup-tokens
+```
+
+This deploys or resolves the Stellar Asset Contract (SAC) for native XLM and configured USDC (`GBBD47IF6LWK7P7MDEVSCWR7DPUWV3NY3DTQEVFL4NAT4AQH3ZLLFLA`), adds them to the donation contract's allowlist via `add_allowed_token`, and verifies them using `is_token_allowed`.
+
+To verify token allowlist consistency against `frontend/lib/assets.js`:
+```bash
+make check-tokens
+```
+
 ## Update repository addresses
 
 After verification, update these records in the same release change:
