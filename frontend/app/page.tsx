@@ -1,14 +1,15 @@
-"use client"
+'use client';
 
-import { useState, useEffect } from 'react'
-import Link from 'next/link'
-import { useRouter } from 'next/navigation'
-import { useAuth } from '@/context/AuthContext'
-import { TipJar } from '@/components/TipJar'
-import { WalletMenu } from '@/components/WalletMenu'
-import { WalletConnectError } from '@/components/WalletConnectError'
-import { categorizeWalletError } from '@/lib/walletErrors'
-import { HugeiconsIcon } from '@hugeicons/react'
+import { useState, useEffect } from 'react';
+import Link from 'next/link';
+import { useRouter } from 'next/navigation';
+import { useAuth } from '@/context/AuthContext';
+import { TipJar } from '@/components/TipJar';
+import { WalletMenu } from '@/components/WalletMenu';
+import { WalletConnectError, type WalletConnectErrorData } from '@/components/WalletConnectError';
+import { categorizeWalletError } from '@/lib/walletErrors';
+import { HugeiconsIcon } from '@hugeicons/react';
+import type { IconSvgElement } from '@hugeicons/react';
 import {
   FlashIcon,
   BankIcon,
@@ -16,9 +17,16 @@ import {
   UserCircleIcon,
   Analytics01Icon,
   CodeIcon,
-} from '@hugeicons/core-free-icons'
+} from '@hugeicons/core-free-icons';
 
-const FEATURES = [
+interface Feature {
+  icon: IconSvgElement;
+  title: string;
+  body: string;
+  color: string;
+}
+
+const FEATURES: Feature[] = [
   {
     icon: FlashIcon,
     title: 'Instant Settlement',
@@ -55,9 +63,14 @@ const FEATURES = [
     body: '100% of every tip goes to the creator. No cut, no hidden charges — just the network fee, which is a fraction of a cent.',
     color: 'bg-brand-lilac',
   },
-]
+];
 
-const STEPS = [
+interface Step {
+  title: string;
+  body: string;
+}
+
+const STEPS: Step[] = [
   {
     title: 'Connect Your Wallet & Create Profile',
     body: 'Connect your Stellar wallet and sign a message to prove ownership, then choose a unique username for your public profile.',
@@ -74,48 +87,58 @@ const STEPS = [
     title: 'Get Tipped, Then Cash Out',
     body: 'Supporters send XLM or USDC tips. Track them live on your dashboard, then withdraw to your bank whenever you want.',
   },
-]
+];
+
+interface PlatformStats {
+  totalCreators: number;
+  totalSignups: number;
+  totalVolumeXlm: number;
+}
 
 export default function Home() {
-  const [connecting, setConnecting] = useState(false)
-  const [walletError, setWalletError] = useState(null)
-  const [platformStats, setPlatformStats] = useState({
+  const [connecting, setConnecting] = useState(false);
+  const [walletError, setWalletError] = useState<WalletConnectErrorData | null>(null);
+  const [platformStats, setPlatformStats] = useState<PlatformStats>({
     totalCreators: 35,
     totalSignups: 35,
     totalVolumeXlm: 1429,
-  })
-  const { user, loginWithWallet } = useAuth()
-  const router = useRouter()
+  });
+  const { user, loginWithWallet } = useAuth();
+  const router = useRouter();
 
   useEffect(() => {
     const fetchStats = async () => {
       try {
-        const apiUrl = process.env.NEXT_PUBLIC_API_URL || 'http://localhost:3001'
-        const res = await fetch(`${apiUrl}/api/activity/overview`)
+        const apiUrl = process.env.NEXT_PUBLIC_API_URL || 'http://localhost:3001';
+        const res = await fetch(`${apiUrl}/api/activity/overview`);
         if (res.ok) {
-          const data = await res.json()
-          const totalCreators = data.totalCreators || data.users?.length || 35
-          const totalSignups = data.totalSignups || 35
-          const totalVolumeXlm = data.earningsByCurrency?.XLM ? Math.round(data.earningsByCurrency.XLM) : 1429
-          setPlatformStats({ totalCreators, totalSignups, totalVolumeXlm })
+          const data = await res.json();
+          const totalCreators = data.totalCreators || data.users?.length || 35;
+          const totalSignups = data.totalSignups || 35;
+          const totalVolumeXlm = data.earningsByCurrency?.XLM
+            ? Math.round(data.earningsByCurrency.XLM)
+            : 1429;
+          setPlatformStats({ totalCreators, totalSignups, totalVolumeXlm });
         }
-      } catch (_) {}
-    }
-    fetchStats()
-  }, [])
+      } catch {
+        /* best-effort: keep the fallback stats */
+      }
+    };
+    fetchStats();
+  }, []);
 
   const handleConnectWallet = async () => {
-    setConnecting(true)
-    setWalletError(null)
+    setConnecting(true);
+    setWalletError(null);
     try {
-      const { hasProfile } = await loginWithWallet()
-      router.push(hasProfile ? '/app' : '/auth/username')
+      const { hasProfile } = await loginWithWallet();
+      router.push(hasProfile ? '/app' : '/auth/username');
     } catch (err) {
-      setWalletError(categorizeWalletError(err))
+      setWalletError(categorizeWalletError(err));
     } finally {
-      setConnecting(false)
+      setConnecting(false);
     }
-  }
+  };
 
   return (
     <div className="min-h-screen bg-background">
@@ -366,5 +389,5 @@ export default function Home() {
         </div>
       </footer>
     </div>
-  )
+  );
 }
