@@ -9,7 +9,7 @@ const TOKEN_TTL_MS = 15 * 60 * 1000;
 const TOKEN_BYTES = 32;
 
 const verifyUrl = (token: string): string =>
-  `${(process.env.APP_URL || "http://localhost:3000").replace(/\/$/, "")}/auth/magic-link/verify?token=${token}`;
+  `${(process.env.APP_URL || "https://localhost:3000").replace(/\/$/, "")}/auth/magic-link/verify?token=${token}`;
 
 function hashToken(token: string): string {
   return createHash("sha256").update(token).digest("hex");

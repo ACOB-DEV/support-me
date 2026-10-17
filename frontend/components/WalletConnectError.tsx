@@ -12,13 +12,17 @@ export interface WalletConnectErrorData {
   retryLabel?: string;
   showInstallLinks?: boolean;
   rawMessage?: string;
+  // Optional link to the matching docs/testnet-troubleshooting.md section;
+  // set by categorizeWalletError, absent for errors not covered there.
+  docsUrl?: string;
 }
 
 /**
  * Actionable wallet-connection error message. Shows the specific failure case
  * (no wallet installed, user rejected, wrong network, or unknown), a retry
  * button that re-runs the connect handler without reloading the page, and
- * wallet install links when no wallet is detected.
+ * wallet install links when no wallet is detected, plus a "Learn more" link
+ * to the troubleshooting guide when the error carries a `docsUrl`.
  */
 export function WalletConnectError({
   error,
@@ -53,6 +57,19 @@ export function WalletConnectError({
       )}
 
       {error.action && <p className="mt-3 text-xs font-bold text-ink/90">{error.action}</p>}
+
+      {error.docsUrl && (
+        <p className="mt-2 text-xs">
+          <a
+            href={error.docsUrl}
+            target="_blank"
+            rel="noopener noreferrer"
+            className="font-bold text-ink underline"
+          >
+            Learn more<span className="sr-only"> about this error (opens in a new tab)</span>
+          </a>
+        </p>
+      )}
 
       <button
         type="button"

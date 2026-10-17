@@ -18,7 +18,7 @@ after a change.
 
 | Variable | Required? | Default / behavior |
 | --- | --- | --- |
-| `CORS_ALLOWED_ORIGINS` | Optional; set for deployed browser frontends. | Empty. Comma-separated exact origins. Outside production, `http://localhost:3000` and `http://127.0.0.1:3000` are added automatically. Production allows no browser origins unless configured. |
+| `CORS_ALLOWED_ORIGINS` | Optional; set for deployed browser frontends. | Empty. Comma-separated exact origins. Outside production, `https://localhost:3000`, `https://127.0.0.1:3000`, `http://localhost:3000` and `http://127.0.0.1:3000` are added automatically (the frontend's `npm run dev` serves HTTPS; `npm run dev:http` and Playwright use HTTP). Production allows no browser origins unless configured. |
 | `TRUST_PROXY` | Optional; set when the API is behind a trusted reverse proxy. | Unset leaves Express's default. Set to the number of proxy hops (commonly `1` on Railway) so IP-based limits see the client address. |
 
 ## Public API rate limits
@@ -80,7 +80,7 @@ as well if the listener needs a non-default endpoint.
 | --- | --- | --- |
 | `TWITTER_CLIENT_ID` | Optional. | Unset. Twitter/X OAuth is unavailable unless all three Twitter variables are configured. |
 | `TWITTER_CLIENT_SECRET` | Optional. | Unset. |
-| `TWITTER_REDIRECT_URI` | Optional. | Unset; set to the exact callback URL registered with the provider. |
+| `TWITTER_REDIRECT_URI` | Optional. | Unset; set to the exact callback URL registered with the provider (locally `https://localhost:3000/auth/twitter/callback`). |
 
 ## Email and application links
 
@@ -88,7 +88,7 @@ as well if the listener needs a non-default endpoint.
 | --- | --- | --- |
 | `RESEND_API_KEY` | Optional. | Unset; outbound messages are logged instead of sent. |
 | `EMAIL_FROM` | Optional. | `SupportMe <notifications@supportme.app>`. Use a sender verified with Resend in deployed environments. |
-| `APP_URL` | Optional locally; set to the canonical public frontend URL in staging and production. | Context-dependent: some email/SEO paths fall back to `https://supportme.app`, while magic-link and preview paths fall back to `http://localhost:3000`. Set it explicitly outside local development so generated links point to the right environment. |
+| `APP_URL` | Optional locally; set to the canonical public frontend URL in staging and production. | Context-dependent: some email/SEO paths fall back to `https://supportme.app`, while magic-link, notification and preview paths fall back to `https://localhost:3000` (the frontend's local HTTPS dev origin). Set it explicitly outside local development so generated links point to the right environment. |
 | `RESEND_WEBHOOK_SECRET` | Optional for the app; required to accept Resend webhook requests. | Unset; webhook requests are rejected when no signing secret is configured. |
 | `NEXT_PUBLIC_STELLAR_NETWORK` | Optional. | `TESTNET`; used to select the network label/link in email templates. |
 

@@ -9,7 +9,7 @@ import {
 import { toAmount } from "../lib/money";
 
 const manageUrl = (): string =>
-  `${(process.env.APP_URL || "http://localhost:3000").replace(/\/$/, "")}/app/subscriptions`;
+  `${(process.env.APP_URL || "https://localhost:3000").replace(/\/$/, "")}/app/subscriptions`;
 
 /**
  * Resolves who to email about a subscription and how to name its creator.

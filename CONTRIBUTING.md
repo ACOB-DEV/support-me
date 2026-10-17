@@ -18,7 +18,7 @@ Thank you for your interest in contributing to SupportMe. This project is built 
 - `backend/` — Express API with Prisma and PostgreSQL support.
 - `contracts/` — Soroban smart contracts (`donation`, `creator-registry`) in a Cargo workspace. Deployed testnet addresses are listed in the README; contract tests run in CI on every pull request.
 - `anchor/` — Local SEP-24 test anchor for the fiat cash-out flow; see [`anchor/README.md`](anchor/README.md).
-- `docs/` — Architecture, API, authentication, security, and runbook documentation.
+- `docs/` — Architecture, API, authentication, security, troubleshooting, and runbook documentation. Start at the index in [`docs/README.md`](docs/README.md).
 - `docs/design/` — Handoff-ready UI/UX specs (donation widget, profile themes, empty states, …). New UI areas start here before implementation.
 - `TESTING.md` — What CI runs and how to run each suite locally.
 
@@ -35,18 +35,34 @@ cd backend
 npm install
 cp .env.example .env
 # update DATABASE_URL in .env
-npm run prisma:generate
+npx prisma migrate dev   # apply migrations (also generates the Prisma client)
 npm run dev
 ```
+
+To change the database schema, follow
+[Creating a schema change](backend/README.md#creating-a-schema-change). Commit
+the generated migration with your change. Do not use `prisma db push` on a
+database you intend to keep.
 
 ### Frontend
 
 ```bash
 cd frontend
 npm install
-# create frontend/.env.local with required env vars
-npm run dev
+cp .env.example .env.local   # every variable is documented in the example
+npm run dev                  # serves https://localhost:3000
 ```
+
+`npm run dev` uses `next dev --experimental-https`. The first run creates a
+self-signed certificate for `localhost` and may ask for your password to trust
+it. Otherwise your browser shows a one-time certificate warning. Use
+`npm run dev:http` if you need plain `http://localhost:3000`. In that case,
+update `APP_URL` and `TWITTER_REDIRECT_URI` in `backend/.env` to match. See the
+README's Frontend Setup section for details.
+
+If a wallet, donation or cash-out step fails on testnet, see
+[`docs/testnet-troubleshooting.md`](docs/testnet-troubleshooting.md). The full
+documentation index is in [`docs/README.md`](docs/README.md).
 
 ### Auth providers (optional)
 
@@ -57,8 +73,10 @@ restart the server:
 - **Twitter/X OAuth**: `TWITTER_CLIENT_ID`, `TWITTER_CLIENT_SECRET`, and
   `TWITTER_REDIRECT_URI`. Register an app at
   [developer.x.com](https://developer.x.com) and set its callback URL to
-  `http://localhost:3000/auth/twitter/callback` (localhost is allowed over HTTP
-  for development).
+  `https://localhost:3000/auth/twitter/callback`, the origin `npm run dev`
+  serves. If you use `npm run dev:http`, register
+  `http://localhost:3000/auth/twitter/callback` instead (Twitter allows HTTP
+  for localhost).
 - **Magic link**: `RESEND_API_KEY` (plus optional `EMAIL_FROM` and `APP_URL`).
   If `RESEND_API_KEY` is unset, the magic link is printed to the backend log
   instead of being emailed — the quickest way to test the flow locally.

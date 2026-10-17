@@ -148,7 +148,9 @@ export function assertRequiredEnv(): void {
  * or staging domain is a config change, not a code change (#179). In
  * development the local frontend origins are added as a convenience; in
  * production nothing is assumed, so an unset value means "allow no browser
- * origins" rather than "allow all".
+ * origins" rather than "allow all". Both schemes are added for local dev:
+ * `npm run dev` serves the frontend on https://localhost:3000, while
+ * `npm run dev:http` and the Playwright web server use plain http.
  */
 export function getAllowedOrigins(): string[] {
   const configured = (process.env.CORS_ALLOWED_ORIGINS ?? "")
@@ -160,6 +162,8 @@ export function getAllowedOrigins(): string[] {
 
   if (process.env.NODE_ENV !== "production") {
     for (const devOrigin of [
+      "https://localhost:3000",
+      "https://127.0.0.1:3000",
       "http://localhost:3000",
       "http://127.0.0.1:3000",
     ]) {

@@ -4,7 +4,7 @@ import { NotFoundError } from "../errors/AppError";
 
 const router = Router();
 
-const APP_URL = (process.env.APP_URL || "http://localhost:3000").replace(/\/$/, "");
+const APP_URL = (process.env.APP_URL || "https://localhost:3000").replace(/\/$/, "");
 
 interface MockGenerators {
   [key: string]: (query: Request["query"]) => unknown;

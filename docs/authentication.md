@@ -140,7 +140,7 @@ executor.
 | --- | --- | --- |
 | `TWITTER_CLIENT_ID` | `abcd1234...` | OAuth 2.0 **Client ID** from the Twitter/X developer app |
 | `TWITTER_CLIENT_SECRET` | `efgh5678...` | OAuth 2.0 **Client Secret** for the same app (server-side only) |
-| `TWITTER_REDIRECT_URI` | `http://localhost:3000/auth/twitter/callback` | Callback URL; must match a URL registered on the Twitter app **exactly** |
+| `TWITTER_REDIRECT_URI` | `https://localhost:3000/auth/twitter/callback` | Callback URL; must match a URL registered on the Twitter app **exactly** |
 
 ### Create a Twitter/X developer app for local use
 
@@ -154,16 +154,19 @@ executor.
    - **Request email address from users**: leave off — SupportMe does not request
      the `users.read.email` scope.
 3. Set the callback URL to your local frontend origin plus the callback path:
-   `http://localhost:3000/auth/twitter/callback`.
-   Twitter allows `http://localhost` for development; any non-localhost callback
-   must be **HTTPS**.
+   `https://localhost:3000/auth/twitter/callback`. The frontend's `npm run dev`
+   serves `https://localhost:3000` (see the README's Frontend Setup). If you
+   run the frontend with `npm run dev:http`, register
+   `http://localhost:3000/auth/twitter/callback` instead. Twitter allows
+   `http://localhost` for development, but any non-localhost callback must be
+   **HTTPS**. You can register both callback URLs on the same app.
 4. Copy the app's **OAuth 2.0 Client ID** and **Client Secret** into
    `backend/.env`:
 
    ```env
    TWITTER_CLIENT_ID="..."
    TWITTER_CLIENT_SECRET="..."
-   TWITTER_REDIRECT_URI="http://localhost:3000/auth/twitter/callback"
+   TWITTER_REDIRECT_URI="https://localhost:3000/auth/twitter/callback"
    ```
 
 5. Restart the backend so the new values are picked up.
@@ -221,7 +224,7 @@ origin used to build the link.
 | --- | --- | --- | --- |
 | `RESEND_API_KEY` | Recommended | — | API key for [Resend](https://resend.com), the transactional email provider. Without it, mail is **logged instead of sent** (see below). |
 | `EMAIL_FROM` | Optional | `SupportMe <notifications@supportme.app>` | `From` address on magic-link (and notification) emails. Must be a domain/address verified in Resend. |
-| `APP_URL` | Optional | `http://localhost:3000` | Public origin used to build the magic-link verification URL. Set this to your deployed frontend origin in production. |
+| `APP_URL` | Optional | `https://localhost:3000` | Public origin used to build the magic-link verification URL. Set this to your deployed frontend origin in production (or to `http://localhost:3000` if you run the frontend with `npm run dev:http`). |
 
 ### Email provider setup (Resend)
 
@@ -234,7 +237,7 @@ origin used to build the link.
    ```env
    RESEND_API_KEY="re_..."
    EMAIL_FROM="SupportMe <no-reply@your-domain.example>"
-   APP_URL="http://localhost:3000"
+   APP_URL="https://localhost:3000"
    ```
 
 4. Restart the backend.
@@ -287,9 +290,16 @@ curl -s -X POST http://localhost:4000/api/auth/magic-link/verify \
 | `TWITTER_REDIRECT_URI` | Twitter | Yes (for Twitter) | Must exactly match the registered callback URL |
 | `RESEND_API_KEY` | Magic link | Recommended | Without it, emails are logged, not sent |
 | `EMAIL_FROM` | Magic link | Optional | Defaults to `SupportMe <notifications@supportme.app>` |
-| `APP_URL` | Magic link | Optional | Defaults to `http://localhost:3000`; set to the deployed origin |
+| `APP_URL` | Magic link | Optional | Defaults to `https://localhost:3000`; set to the deployed origin |
 
 See [`backend/.env.example`](../backend/.env.example) for a copy-paste template.
+
+The backend's CORS allowlist (`CORS_ALLOWED_ORIGINS`) automatically includes
+`https://localhost:3000`, `http://localhost:3000` and the matching
+`127.0.0.1` origins outside production. A deployed frontend must be listed
+explicitly, for example
+`CORS_ALLOWED_ORIGINS="https://your-frontend.example"`. See
+[`backend/docs/CONFIGURATION.md`](../backend/docs/CONFIGURATION.md).
 
 ## Security notes
 

@@ -4,6 +4,8 @@
 // reject with loosely-typed messages/objects, so categorization is based on
 // conservative message heuristics with a friendly fallback.
 
+import { troubleshootingUrl } from './docs';
+
 export const WALLET_CATEGORY = {
   NO_WALLET: 'NO_WALLET',
   USER_REJECTED: 'USER_REJECTED',
@@ -78,6 +80,11 @@ const CATEGORY_META = {
   },
 };
 
+// Every title this module can show. Each must have a matching heading in
+// docs/testnet-troubleshooting.md (enforced by troubleshootingDoc.test.ts),
+// since results link to that section via `docsUrl`.
+export const WALLET_ERROR_TITLES = Object.values(CATEGORY_META).map((meta) => meta.title);
+
 // Ordered list of matchers. NO_WALLET wins over the others because messages
 // like "Freighter is not connected" must not be read as a user rejection.
 const PATTERNS = [
@@ -101,7 +108,8 @@ const PATTERNS = [
 /**
  * Maps any value raised by a wallet operation (Error, kit `{ code, message }`
  * object, or plain string) to a category with a user-facing title, message,
- * retry hint and optional install links. Raw messages are kept on the result
+ * retry hint, optional install links and a `docsUrl` pointing at the matching
+ * troubleshooting section. Raw messages are kept on the result
  * so the UI can surface them in the fallback (UNKNOWN) case only.
  */
 export function categorizeWalletError(err) {
@@ -112,7 +120,8 @@ export function categorizeWalletError(err) {
 
   for (const pattern of PATTERNS) {
     if (pattern.test.test(message)) {
-      return { ...CATEGORY_META[pattern.type], rawMessage: message || undefined };
+      const meta = CATEGORY_META[pattern.type];
+      return { ...meta, docsUrl: troubleshootingUrl(meta.title), rawMessage: message || undefined };
     }
   }
 
@@ -120,6 +129,9 @@ export function categorizeWalletError(err) {
   // specific thing we have for cases the mapping doesn't cover (e.g. a
   // backend sign-in challenge rejection), and the generic string is only used
   // when there is nothing else to show.
-  const fallback = CATEGORY_META[WALLET_CATEGORY.UNKNOWN];
-  return message ? { ...fallback, message } : { ...fallback };
+  const fallback = {
+    ...CATEGORY_META[WALLET_CATEGORY.UNKNOWN],
+    docsUrl: troubleshootingUrl(CATEGORY_META[WALLET_CATEGORY.UNKNOWN].title),
+  };
+  return message ? { ...fallback, message } : fallback;
 }

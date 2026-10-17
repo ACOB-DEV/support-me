@@ -1,4 +1,5 @@
 import { DonationError } from './contract';
+import { troubleshootingUrl } from './docs';
 
 /**
  * Shared copy for donation/subscription failure states, implementing the
@@ -14,22 +15,46 @@ export interface FlowFailure {
   message: string;
   action: string;
   retryable: boolean;
+  /** Link to this failure's section in docs/testnet-troubleshooting.md. */
+  docsUrl: string;
 }
+
+/**
+ * Every title the donation/subscription failure copy can show. Each must have
+ * a matching heading in docs/testnet-troubleshooting.md (enforced by
+ * troubleshootingDoc.test.ts), since failures link there via `docsUrl`.
+ */
+export const FAILURE_TITLES = {
+  signatureDeclined: 'Signature declined',
+  notEnoughBalance: 'Not enough balance',
+  transactionRejected: 'Transaction rejected',
+  confirmationTimedOut: 'Confirmation timed out',
+  transactionFailed: 'Transaction failed',
+  networkError: 'Network error',
+  donate: 'Donation failed',
+  subscribe: "Couldn't start subscription",
+  cancel: "Couldn't cancel subscription",
+} as const;
 
 const INSUFFICIENT_PATTERN = /insufficient|underfunded|allowance/i;
 const TIMEOUT_PATTERN = /timed out|did not confirm|confirmation/i;
 
 const FLOW_TITLES: Record<DonationFlow, string> = {
-  donate: 'Donation failed',
-  subscribe: "Couldn't start subscription",
-  cancel: "Couldn't cancel subscription",
+  donate: FAILURE_TITLES.donate,
+  subscribe: FAILURE_TITLES.subscribe,
+  cancel: FAILURE_TITLES.cancel,
 };
 
 export function describeDonationFailure(err: unknown, flow: 'donate' | 'subscribe'): FlowFailure {
+  const failure = describeFailureCopy(err, flow);
+  return { ...failure, docsUrl: troubleshootingUrl(failure.title) };
+}
+
+function describeFailureCopy(err: unknown, flow: 'donate' | 'subscribe'): Omit<FlowFailure, 'docsUrl'> {
   if (err instanceof DonationError) {
     if (err.type === 'wallet') {
       return {
-        title: 'Signature declined',
+        title: FAILURE_TITLES.signatureDeclined,
         message:
           'The transaction was cancelled or could not be approved in your wallet. No funds were moved.',
         action: 'Open your wallet and approve the request to try again.',
@@ -40,7 +65,7 @@ export function describeDonationFailure(err: unknown, flow: 'donate' | 'subscrib
     if (err.type === 'simulation') {
       if (INSUFFICIENT_PATTERN.test(err.message || '')) {
         return {
-          title: 'Not enough balance',
+          title: FAILURE_TITLES.notEnoughBalance,
           message:
             "Your wallet doesn't have enough to cover this amount plus the network fee.",
           action: 'Lower the amount or add funds to your wallet, then try again.',
@@ -48,7 +73,7 @@ export function describeDonationFailure(err: unknown, flow: 'donate' | 'subscrib
         };
       }
       return {
-        title: 'Transaction rejected',
+        title: FAILURE_TITLES.transactionRejected,
         message: err.message || 'The network rejected this transaction during simulation.',
         action: 'Check the amount and details, then try again.',
         retryable: true,
@@ -58,7 +83,7 @@ export function describeDonationFailure(err: unknown, flow: 'donate' | 'subscrib
     if (err.type === 'network') {
       if (TIMEOUT_PATTERN.test(err.message || '')) {
         return {
-          title: 'Confirmation timed out',
+          title: FAILURE_TITLES.confirmationTimedOut,
           message:
             'The network has not confirmed this transaction yet — it may still succeed.',
           action:
@@ -68,7 +93,7 @@ export function describeDonationFailure(err: unknown, flow: 'donate' | 'subscrib
       }
       if (/failed on the network|rejected the transaction/i.test(err.message || '')) {
         return {
-          title: 'Transaction failed',
+          title: FAILURE_TITLES.transactionFailed,
           message: err.message || 'The transaction failed on the network.',
           action:
             'Check the transaction on Stellar Explorer for the failure reason, then adjust and try again.',
@@ -76,7 +101,7 @@ export function describeDonationFailure(err: unknown, flow: 'donate' | 'subscrib
         };
       }
       return {
-        title: 'Network error',
+        title: FAILURE_TITLES.networkError,
         message: err.message || "The Stellar network could not be reached.",
         action: 'Check your connection (the offline banner shows your status), then try again.',
         retryable: true,
