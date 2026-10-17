@@ -5,10 +5,11 @@ import { notify } from '@/lib/notify';
 import { useAuth } from '@/context/AuthContext';
 import { API_URL } from '@/lib/api';
 import { fetchWithRetry, isNetworkError } from '@/lib/network';
+import { ConfirmDialog } from '@/components/ConfirmDialog';
 
 /**
  * Settings → "Your data": GDPR-style export (JSON download) and deletion
- * (typed confirmation → anonymize) backed by /api/account. Shown even when
+ * (typed confirmation in a ConfirmDialog → anonymize) backed by /api/account. Shown even when
  * the signed-in user has no creator profile yet, so the actions are always
  * reachable from /settings.
  */
@@ -104,61 +105,45 @@ export function AccountDataSection() {
           {exporting ? 'Preparing export…' : 'Export my data (JSON)'}
         </button>
 
-        {!confirming && (
-          <button
-            type="button"
-            onClick={() => setConfirming(true)}
-            disabled={exporting || deleting}
-            className="btn-brutal bg-brand-pink text-ink"
-          >
-            Delete account…
-          </button>
-        )}
+        <button
+          type="button"
+          onClick={() => setConfirming(true)}
+          disabled={exporting || deleting}
+          className="btn-brutal btn-brutal-danger"
+        >
+          Delete account…
+        </button>
       </div>
 
-      {confirming && (
-        <div className="card-brutal bg-brand-pink/40 p-4 space-y-3">
-          <p className="text-sm font-bold text-ink">
-            This permanently anonymizes your profile, email, donation messages and active
-            subscriptions. It cannot be undone.
-          </p>
-          <div>
-            <label htmlFor="delete-confirm" className="block text-sm font-bold text-ink mb-2">
-              Type <span className="font-mono">DELETE</span> to confirm
-            </label>
-            <input
-              id="delete-confirm"
-              type="text"
-              value={confirmText}
-              onChange={(e) => setConfirmText(e.target.value)}
-              autoComplete="off"
-              placeholder="DELETE"
-              className="input-brutal"
-            />
-          </div>
-          <div className="flex flex-col sm:flex-row gap-3">
-            <button
-              type="button"
-              onClick={handleDelete}
-              disabled={confirmText !== 'DELETE' || deleting}
-              className="btn-brutal bg-brand-pink text-ink"
-            >
-              {deleting ? 'Deleting…' : 'Permanently delete my data'}
-            </button>
-            <button
-              type="button"
-              onClick={() => {
-                setConfirming(false);
-                setConfirmText('');
-              }}
-              disabled={deleting}
-              className="btn-brutal btn-brutal-white"
-            >
-              Cancel
-            </button>
-          </div>
+      <ConfirmDialog
+        open={confirming}
+        title="Delete your account?"
+        description="This permanently anonymizes your profile, email, donation messages and active subscriptions. It cannot be undone."
+        confirmLabel="Permanently delete my data"
+        confirmDisabled={confirmText !== 'DELETE'}
+        busy={deleting}
+        busyLabel="Deleting…"
+        onConfirm={handleDelete}
+        onCancel={() => {
+          setConfirming(false);
+          setConfirmText('');
+        }}
+      >
+        <div>
+          <label htmlFor="delete-confirm" className="block text-sm font-bold text-ink mb-2">
+            Type <span className="font-mono">DELETE</span> to confirm
+          </label>
+          <input
+            id="delete-confirm"
+            type="text"
+            value={confirmText}
+            onChange={(e) => setConfirmText(e.target.value)}
+            autoComplete="off"
+            placeholder="DELETE"
+            className="input-brutal"
+          />
         </div>
-      )}
+      </ConfirmDialog>
     </section>
   );
 }

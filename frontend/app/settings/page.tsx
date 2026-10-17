@@ -18,6 +18,7 @@ import { API_URL } from '@/lib/api';
 import { fetchWithRetry, isNetworkError } from '@/lib/network';
 import { AccountDataSection } from '@/components/AccountDataSection';
 import { ThemeEditor } from '@/components/ThemeEditor';
+import { ConfirmDialog } from '@/components/ConfirmDialog';
 
 interface Goal {
   id: number;
@@ -75,6 +76,9 @@ export default function SettingsPage() {
   const [newGoalInterval, setNewGoalInterval] = useState<'WEEKLY' | 'MONTHLY'>('MONTHLY');
   const [goalDraft, setGoalDraft] = useState<GoalDraft | null>(null);
   const [savingGoal, setSavingGoal] = useState(false);
+  // Goal awaiting confirmation in the delete dialog.
+  const [goalToDelete, setGoalToDelete] = useState<Goal | null>(null);
+  const [deletingGoal, setDeletingGoal] = useState(false);
 
   const fileInputRef = useRef<HTMLInputElement>(null);
 
@@ -208,8 +212,7 @@ export default function SettingsPage() {
   };
 
   const handleDeleteGoal = async (goal: Goal) => {
-    if (!window.confirm(`Delete "${goal.title || `${goal.currency} goal`}"? This can't be undone.`)) return;
-
+    setDeletingGoal(true);
     try {
       const res = await fetch(`${API_URL}/api/goals/${goal.id}`, {
         method: 'DELETE',
@@ -223,6 +226,9 @@ export default function SettingsPage() {
       notify.success('Goal deleted.');
     } catch (err) {
       notify.error('Could not delete goal', err);
+    } finally {
+      setDeletingGoal(false);
+      setGoalToDelete(null);
     }
   };
 
@@ -680,7 +686,7 @@ export default function SettingsPage() {
                             </button>
                             <button
                               type="button"
-                              onClick={() => handleDeleteGoal(g)}
+                              onClick={() => setGoalToDelete(g)}
                               className="btn-brutal btn-brutal-white text-xs px-3 py-1.5"
                             >
                               Delete
@@ -853,6 +859,42 @@ export default function SettingsPage() {
           </div>
         </main>
       </div>
+
+      <ConfirmDialog
+        open={goalToDelete !== null}
+        title={`Delete "${goalToDelete?.title || `${goalToDelete?.currency} goal`}"?`}
+        description="This removes the goal from your profile. It can't be undone."
+        confirmLabel="Delete goal"
+        busy={deletingGoal}
+        busyLabel="Deleting…"
+        onConfirm={() => goalToDelete && handleDeleteGoal(goalToDelete)}
+        onCancel={() => setGoalToDelete(null)}
+      >
+        {goalToDelete && <GoalSummary goal={goalToDelete} />}
+      </ConfirmDialog>
     </ProtectedRoute>
+  );
+}
+
+// Shown in the delete dialog so the creator can see which goal (and how much
+// progress) they're about to lose.
+function GoalSummary({ goal }: { goal: Goal }) {
+  const pct = Math.min(100, (goal.currentAmount / goal.targetAmount) * 100);
+  return (
+    <div className="card-brutal bg-card p-4 space-y-2">
+      <p className="text-sm font-bold text-ink">
+        {goal.currentAmount.toFixed(0)} / {goal.targetAmount.toFixed(0)} {goal.currency} raised ({pct.toFixed(0)}%)
+      </p>
+      <div
+        className="h-3 w-full border-2 border-ink rounded-full overflow-hidden bg-background"
+        role="progressbar"
+        aria-label="Goal progress"
+        aria-valuemin={0}
+        aria-valuemax={100}
+        aria-valuenow={Math.round(pct)}
+      >
+        <div className="h-full bg-primary" style={{ width: `${pct}%` }} />
+      </div>
+    </div>
   );
 }
