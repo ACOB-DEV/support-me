@@ -19,7 +19,7 @@ describe('ProfileSkeleton', () => {
     expect(tabsGrid).toBeInTheDocument();
 
     // Contains pulsing elements
-    const pulsingElements = container.querySelectorAll('.animate-pulse');
+    const pulsingElements = container.querySelectorAll('.motion-safe\\:animate-pulse');
     expect(pulsingElements.length).toBeGreaterThan(10);
   });
 });

@@ -37,6 +37,7 @@ All high-impact and critical findings have been remediated in this branch.
 | **A11Y-07** | ARIA States | **Medium** | `frontend/app/[username]/CreatorProfileClient.tsx` | Preset donation buttons (e.g. 5, 10, 25, 50) lacked `aria-pressed` to indicate active selection state (WCAG 4.1.2). | **Resolved**: Added `aria-pressed={donationAmount === preset}` to all preset buttons. |
 | **A11Y-08** | ARIA & Labels | **Medium** | `frontend/components/WalletMenu.tsx` | Wallet menu dropdown trigger button lacked explicit accessible label (WCAG 4.1.2). | **Resolved**: Added `aria-label="Wallet menu"` and `aria-expanded` state. |
 | **A11Y-09** | Dialog Semantics | **Low** | `frontend/components/ShareModal.tsx` | Modal dialog accessibility verification (WCAG 2.1.2 No Keyboard Trap, 2.4.3 Focus Order). | **Verified**: Verified `role="dialog"`, `aria-modal="true"`, `aria-labelledby`, and `Escape` key listeners are in place. |
+| **A11Y-10** | Motion | **Medium** | `frontend/components/Skeleton.tsx`, `frontend/app/[username]/CreatorProfileClient.tsx`, `frontend/app/dashboard/page.tsx`, `frontend/app/globals.css` | Skeleton pulses, status-text pulse and the "load more" spinner looped regardless of the OS reduced-motion setting; only `TipJar` checked it, and only after hydration (WCAG 2.3.3 Animation from Interactions). | **Resolved**: Animations use Tailwind's `motion-safe:` variant; a global `@media (prefers-reduced-motion: reduce)` block stops the tip jar keyframes and makes transitions instant before any JS runs. Under reduced motion skeletons stay dimmed (`motion-reduce:opacity-60`) and their regions are marked `aria-busy="true"`, so loading still reads as loading. |
 
 ---
 
@@ -115,3 +116,24 @@ Automated test suites are defined in `frontend/app/__tests__/accessibility.test.
 3. Distinct accessible names (`aria-label`) on icon-only and interactive buttons.
 4. Correct ARIA expanded and controls linkage on collapsible navigation.
 5. Presence of `role="alert"` and accessible names on form validation messages.
+
+---
+
+## 6. Reduced Motion Check (WCAG 2.3.3)
+
+Run this check whenever adding an animation, transition or loading state.
+
+**Rules for new code**
+- Use `motion-safe:animate-*` (never a bare `animate-*`) for anything that loops: pulses, spins, bounces.
+- Give the reduced-motion state a static cue that it is loading (e.g. `motion-reduce:opacity-60` on placeholders, `aria-busy="true"` on the loading region, or visible "Loading…" text).
+- Custom keyframes in `app/globals.css` must be covered by the `@media (prefers-reduced-motion: reduce)` block at the end of that file.
+
+**Manual check**
+1. Turn on reduced motion: macOS *System Settings → Accessibility → Display → Reduce motion*; Windows *Settings → Accessibility → Visual effects → Animation effects* off; or Chrome DevTools *Rendering → Emulate CSS media feature prefers-reduced-motion: reduce*.
+2. Load `/[username]` (profile skeleton and donation status), `/dashboard` (dashboard skeleton, "Loading older donations…" spinner), `/activity`, and any page that shows the tip jar loader.
+3. Confirm that nothing pulses, spins or slides, and that loading placeholders are still clearly different from loaded content.
+
+**Automated coverage**
+- `frontend/components/__tests__/Skeleton.test.tsx` checks that skeletons only animate behind `motion-safe:`, dim under `motion-reduce:`, and mark their region `aria-busy`.
+- `frontend/e2e/reduced-motion.spec.ts` uses `page.emulateMedia({ reducedMotion: 'reduce' })` to check that the profile skeleton has no running animation, and that it still pulses when motion is allowed.
+

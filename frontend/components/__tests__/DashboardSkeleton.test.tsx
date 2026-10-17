@@ -30,7 +30,7 @@ describe('DashboardSkeleton', () => {
     expect(screen.getByTestId('donation-history-skeleton')).toBeInTheDocument();
 
     // Multiple pulsing skeleton elements
-    const pulsingElements = container.querySelectorAll('.animate-pulse');
+    const pulsingElements = container.querySelectorAll('.motion-safe\\:animate-pulse');
     expect(pulsingElements.length).toBeGreaterThan(20);
   });
 

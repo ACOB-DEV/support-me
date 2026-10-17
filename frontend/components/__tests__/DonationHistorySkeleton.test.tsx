@@ -20,7 +20,7 @@ describe('DonationHistorySkeleton', () => {
 
   it('contains pulsing placeholder elements for each row', () => {
     const { container } = render(<DonationHistorySkeleton rows={2} />);
-    const pulsing = container.querySelectorAll('.animate-pulse');
+    const pulsing = container.querySelectorAll('.motion-safe\\:animate-pulse');
     expect(pulsing.length).toBeGreaterThanOrEqual(8);
   });
 

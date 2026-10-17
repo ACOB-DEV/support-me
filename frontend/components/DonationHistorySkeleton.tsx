@@ -13,6 +13,7 @@ export function DonationHistorySkeleton({
     <ul
       className={`divide-y divide-ink/10 ${className}`}
       data-testid="donation-history-skeleton"
+      aria-busy="true"
       aria-label="Loading donation history"
     >
       {Array.from({ length: rows }).map((_, i) => (
