@@ -1,5 +1,5 @@
 import { Router } from "express";
-import { Prisma } from "@prisma/client";
+import { Prisma, Creator } from "@prisma/client";
 import prisma from "../prisma";
 import { authMiddleware, AuthRequest } from "../middleware/auth";
 import { asyncHandler } from "../middleware/asyncHandler";
@@ -23,7 +23,7 @@ const router = Router();
 // Cache creator profile lookups by username with a 5-minute TTL.
 // Profiles change infrequently, so this reduces DB load while staying fresh.
 // Exported so tests can reset it between cases.
-export const creatorProfileCache = new TtlCache<any>(5 * 60 * 1000);
+export const creatorProfileCache = new TtlCache<Creator>(5 * 60 * 1000);
 
 interface LeaderboardEntry {
   rank: number;
@@ -104,7 +104,7 @@ router.get(
 
 router.get(
   "/me",
-  authMiddleware as any,
+  authMiddleware,
   asyncHandler(async (req: AuthRequest, res) => {
     if (!req.user) {
       throw new UnauthorizedError("User not authenticated");
@@ -123,7 +123,7 @@ router.get(
 // over all verified donations, not just the page the dashboard has loaded.
 router.get(
   "/me/stats",
-  authMiddleware as any,
+  authMiddleware,
   asyncHandler(async (req: AuthRequest, res) => {
     if (!req.user) {
       throw new UnauthorizedError("User not authenticated");
@@ -247,7 +247,7 @@ router.get(
 
 router.post(
   "/:username/create",
-  authMiddleware as any,
+  authMiddleware,
   validate({ params: createCreatorParamsSchema, body: createCreatorSchema }),
   asyncHandler(async (req: AuthRequest, res) => {
     const { username } = req.params;
@@ -286,7 +286,7 @@ router.post(
 
 router.put(
   "/:username",
-  authMiddleware as any,
+  authMiddleware,
   validate({ params: usernameParamSchema, body: updateCreatorSchema }),
   asyncHandler(async (req: AuthRequest, res) => {
     const { username } = req.params;
@@ -322,7 +322,7 @@ router.put(
 // Saves (or, with `theme: null`, resets) the creator's public profile theme.
 router.patch(
   "/:username/theme",
-  authMiddleware as any,
+  authMiddleware,
   validate({ params: usernameParamSchema, body: updateThemeSchema }),
   asyncHandler(async (req: AuthRequest, res) => {
     const { username } = req.params;

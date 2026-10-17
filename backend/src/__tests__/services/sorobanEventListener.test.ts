@@ -6,9 +6,14 @@ import {
   SUBSCRIPTION_CANCELLED_EVENT,
   GOAL_UPDATED_EVENT,
   DONATION_RECORDED_EVENT,
+  DonationEvent,
+  SubscriptionCreatedEvent,
+  SubscriptionCancelledEvent,
+  GoalUpdatedEvent,
+  DonationRecordedEvent,
 } from "../../services/eventBus";
 import prisma from "../../prisma";
-import { xdr, nativeToScVal } from "@stellar/stellar-sdk";
+import { nativeToScVal } from "@stellar/stellar-sdk";
 
 jest.mock("../../prisma", () => ({
   __esModule: true,
@@ -32,8 +37,8 @@ describe("SorobanEventListener event processing & reconciliation", () => {
   });
 
   it("processes 'donated' event with token and emits DONATION_EVENT", async () => {
-    const emittedEvents: any[] = [];
-    const handler = (evt: any) => emittedEvents.push(evt);
+    const emittedEvents: DonationEvent[] = [];
+    const handler = (evt: DonationEvent) => emittedEvents.push(evt);
     eventBus.on(DONATION_EVENT, handler);
 
     const rawEvent: RawEvent = {
@@ -69,8 +74,8 @@ describe("SorobanEventListener event processing & reconciliation", () => {
   });
 
   it("processes 'subscribed' event with schedule details and emits SUBSCRIPTION_CREATED_EVENT", async () => {
-    const emittedEvents: any[] = [];
-    const handler = (evt: any) => emittedEvents.push(evt);
+    const emittedEvents: SubscriptionCreatedEvent[] = [];
+    const handler = (evt: SubscriptionCreatedEvent) => emittedEvents.push(evt);
     eventBus.on(SUBSCRIPTION_CREATED_EVENT, handler);
 
     const rawEvent: RawEvent = {
@@ -106,8 +111,8 @@ describe("SorobanEventListener event processing & reconciliation", () => {
   });
 
   it("processes 'sub_cancelled' event and reconciles database subscription state without polling", async () => {
-    const emittedEvents: any[] = [];
-    const handler = (evt: any) => emittedEvents.push(evt);
+    const emittedEvents: SubscriptionCancelledEvent[] = [];
+    const handler = (evt: SubscriptionCancelledEvent) => emittedEvents.push(evt);
     eventBus.on(SUBSCRIPTION_CANCELLED_EVENT, handler);
 
     const rawEvent: RawEvent = {
@@ -141,8 +146,8 @@ describe("SorobanEventListener event processing & reconciliation", () => {
   });
 
   it("processes 'goal_upd' event and reconciles creator donation goal in database", async () => {
-    const emittedEvents: any[] = [];
-    const handler = (evt: any) => emittedEvents.push(evt);
+    const emittedEvents: GoalUpdatedEvent[] = [];
+    const handler = (evt: GoalUpdatedEvent) => emittedEvents.push(evt);
     eventBus.on(GOAL_UPDATED_EVENT, handler);
 
     const rawEvent: RawEvent = {
@@ -177,8 +182,8 @@ describe("SorobanEventListener event processing & reconciliation", () => {
   });
 
   it("processes 'don_rec' event and emits DONATION_RECORDED_EVENT", async () => {
-    const emittedEvents: any[] = [];
-    const handler = (evt: any) => emittedEvents.push(evt);
+    const emittedEvents: DonationRecordedEvent[] = [];
+    const handler = (evt: DonationRecordedEvent) => emittedEvents.push(evt);
     eventBus.on(DONATION_RECORDED_EVENT, handler);
 
     const rawEvent: RawEvent = {

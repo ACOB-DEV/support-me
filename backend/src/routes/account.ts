@@ -11,7 +11,7 @@ const router = Router();
 
 router.get(
   "/export",
-  authMiddleware as any,
+  authMiddleware,
   asyncHandler(async (req: AuthRequest, res) => {
     if (!req.user) {
       throw new UnauthorizedError("User not authenticated");
@@ -93,7 +93,7 @@ router.get(
 
 router.post(
   "/delete",
-  authMiddleware as any,
+  authMiddleware,
   validate({ body: deleteAccountSchema }),
   asyncHandler(async (req: AuthRequest, res) => {
     if (!req.user) {

@@ -216,8 +216,7 @@ export class SubscriptionExecutor {
 
   private async recordFailure(subscription: Subscription, message: string): Promise<void> {
     const isPermanent = message.includes("failed on-chain") || message.includes("reverted");
-    const currentFailureCount = (subscription as any).failureCount || 0;
-    const failureCount = currentFailureCount + 1;
+    const failureCount = subscription.failureCount + 1;
     const maxAttempts = isPermanent ? 3 : 24; // bounded attempts
     const shouldDeactivate = failureCount >= maxAttempts;
 
