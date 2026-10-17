@@ -35,20 +35,25 @@ function Coin({ x, y, r, size = 20 }: { x: number; y: number; r: number; size?: 
   );
 }
 
+// Respect users who prefer reduced motion: fill the jar statically and skip
+// the looping animation entirely. Read once as the initial state so the
+// reduced-motion case never needs a synchronous setState from inside the
+// effect below.
+function prefersReducedMotion(): boolean {
+  return (
+    typeof window !== 'undefined' &&
+    Boolean(window.matchMedia?.('(prefers-reduced-motion: reduce)').matches)
+  );
+}
+
 export function TipJar({ widthClass = 'w-[260px] sm:w-[320px]' }: { widthClass?: string }) {
   // Number of coins resting in the jar, and whether one is mid-drop. The whole
   // cycle runs on a self-scheduling timer — no click needed.
-  const [landed, setLanded] = useState(0);
+  const [landed, setLanded] = useState(() => (prefersReducedMotion() ? RESTING_SPOTS.length : 0));
   const [dropping, setDropping] = useState(false);
 
   useEffect(() => {
-    // Respect users who prefer reduced motion: fill the jar statically and skip
-    // the looping animation entirely.
-    const prefersReduced =
-      typeof window !== 'undefined' &&
-      window.matchMedia?.('(prefers-reduced-motion: reduce)').matches;
-    if (prefersReduced) {
-      setLanded(RESTING_SPOTS.length);
+    if (prefersReducedMotion()) {
       return;
     }
 

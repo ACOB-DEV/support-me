@@ -1,13 +1,19 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import { render, screen, waitFor, fireEvent } from '@testing-library/react';
+import type { ImageProps } from 'next/image';
 import LeaderboardPage from '../page';
 
 vi.mock('next/image', () => ({
-  default: ({ src, alt, unoptimized, ...rest }: any) => <img src={src} alt={alt} {...rest} />,
+  default: ({ src, alt, unoptimized, ...rest }: ImageProps) => {
+    // Accepted but intentionally unused: next/image's own prop, irrelevant to this plain-<img> stub.
+    void unoptimized;
+    // eslint-disable-next-line @next/next/no-img-element -- test stub standing in for next/image, not a real <img>
+    return <img src={typeof src === 'string' ? src : undefined} alt={alt} {...rest} />;
+  },
 }));
 
 vi.mock('@hugeicons/react', () => ({
-  HugeiconsIcon: (props: any) => <span data-testid="hugeicon" {...props} />,
+  HugeiconsIcon: () => <span data-testid="hugeicon" />,
 }));
 
 vi.mock('@/context/AuthContext', () => ({

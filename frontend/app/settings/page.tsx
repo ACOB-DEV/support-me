@@ -86,7 +86,7 @@ export default function SettingsPage() {
   useEffect(() => {
     if (!creator) return;
     setDisplayName(creator.displayName || '');
-    setBio((creator as any).bio || '');
+    setBio(creator.bio || '');
     setAvatarUrl(creator.avatarUrl || '');
     setAcceptsXlm(creator.acceptsXlm ?? true);
     setAcceptsUsdc(creator.acceptsUsdc ?? true);

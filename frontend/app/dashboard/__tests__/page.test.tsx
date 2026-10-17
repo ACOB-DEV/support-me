@@ -177,7 +177,11 @@ function mockFetchByUrl({
   if (creatorNotFound) {
     mockUseCreator.mockReturnValue({ creator: null, loading: false, invalidate: vi.fn() });
   } else if (creator !== undefined) {
-    mockUseCreator.mockReturnValue({ creator: creator as any, loading: false, invalidate: vi.fn() });
+    mockUseCreator.mockReturnValue({
+      creator: creator as ReturnType<typeof useCreator>['creator'],
+      loading: false,
+      invalidate: vi.fn(),
+    });
   }
 
   vi.mocked(fetch).mockImplementation((input: RequestInfo | URL) => {

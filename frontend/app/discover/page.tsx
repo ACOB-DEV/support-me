@@ -140,8 +140,8 @@ export default function DiscoverPage() {
             SupportMe
           </Link>
           <div className="hidden sm:flex items-center gap-6">
-            <a href="/#features" className="font-bold text-ink hover:text-primary transition">Features</a>
-            <a href="/#how-it-works" className="font-bold text-ink hover:text-primary transition">How it Works</a>
+            <Link href="/#features" className="font-bold text-ink hover:text-primary transition">Features</Link>
+            <Link href="/#how-it-works" className="font-bold text-ink hover:text-primary transition">How it Works</Link>
             <Link href="/discover" className="font-bold text-primary underline underline-offset-4">Discover</Link>
             {user && (
               <Link href="/app" className="font-bold text-ink hover:text-primary transition">
