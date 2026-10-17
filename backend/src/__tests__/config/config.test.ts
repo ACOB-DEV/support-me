@@ -85,6 +85,8 @@ describe("CORS origin allowlist (#179)", () => {
   it("includes the local frontend origins outside production", () => {
     process.env.NODE_ENV = "development";
     expect(getAllowedOrigins()).toContain("http://localhost:3000");
+    // `npm run dev` in frontend/ serves https://localhost:3000.
+    expect(getAllowedOrigins()).toContain("https://localhost:3000");
   });
 
   it("parses a comma-separated allowlist and trims whitespace and trailing slashes", () => {

@@ -25,9 +25,9 @@ It is built with TypeScript, Express, and Prisma, and is designed to support cre
 
 3. Set your database URL in `.env`.
 
-4. Generate Prisma client:
+4. Apply the database migrations (this also generates the Prisma client):
    ```bash
-   npm run prisma:generate
+   npx prisma migrate dev
    ```
 
 5. Run the backend in development mode:
@@ -74,5 +74,38 @@ logged before the next attempt.
 - Soroban donation events are indexed with a durable `(transaction hash, operation index, event index)` identity. A listener restart may replay the configured lookback window, but the unique on-chain identity makes the database write an idempotent upsert rather than a second donation. New contract events include the SAC token address; redeploy the donation contract with this event shape before relying on USDC classification, and configure `SOROBAN_USDC_ISSUER` (or `SOROBAN_USDC_TOKEN_ID`) so the listener can classify USDC instead of guessing.
 - Donation rows reported by a browser with a transaction hash remain provisional (`verified: false`) and are excluded from aggregate queries until the listener verifies the on-chain event; the listener then replaces the provisional metadata with authoritative event data.
 - Admin overview access and future state-changing admin routes are recorded in `AdminAuditLog`; `/api/admin/audit-logs` exposes the recent entries to allowlisted admins.
-- If you add a new database model, update `prisma/schema.prisma` and run `npm run prisma:generate`.
-- Apply schema changes with `npx prisma db push` in environments that do not yet use Prisma migrations. Reconcile any historical duplicate on-chain identities before adding the unique constraint to a populated database.
+- If you add or change a database model, follow [Creating a schema change](#creating-a-schema-change) below.
+
+## Creating a schema change
+
+The schema is versioned with Prisma Migrate. Every change to
+`prisma/schema.prisma` ships with a migration folder in
+[`prisma/migrations/`](prisma/migrations).
+
+1. Edit `prisma/schema.prisma`.
+2. Create and apply a migration against your local database. Give it a short
+   descriptive name:
+   ```bash
+   npx prisma migrate dev --name add_creator_banner
+   # or: npm run prisma:migrate -- --name add_creator_banner
+   ```
+   This writes `prisma/migrations/<timestamp>_add_creator_banner/migration.sql`,
+   applies it, and regenerates the Prisma client.
+3. Review the generated SQL. If the change needs a data backfill, or could fail
+   on existing rows (for example a new `NOT NULL` column or a new unique
+   constraint), edit `migration.sql` before you commit. For a unique
+   constraint, reconcile duplicate rows first.
+4. Commit the schema change and the new migration folder together, along with
+   any code and tests that use them.
+5. Staging and production apply committed migrations with:
+   ```bash
+   npx prisma migrate deploy   # or: npm run prisma:deploy
+   ```
+   `migrate deploy` only applies pending migrations. It never creates
+   migrations, prompts, or resets data, so it is safe to run in CI and deploys.
+   Never run `migrate dev` against a shared database.
+
+`npx prisma db push` syncs the schema to a database without recording a
+migration. Use it only for a throwaway prototype database. A database that was
+set up with `db push` has no migration history, so `migrate deploy` cannot
+manage it later.

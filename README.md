@@ -191,7 +191,7 @@ only reachable through the `donation` contract's cross-contract calls.
 │   │   └── contract.js         # Soroban donation contract calls
 │   ├── vitest.config.ts        # Vitest + React Testing Library setup
 │   └── package.json
-├── docs/                       # Architecture documentation
+├── docs/                       # Project documentation (index: docs/README.md)
 ├── PRD(v2).md                  # Product requirements
 ├── CONTRIBUTING.md             # Contribution guide
 └── README.md
@@ -268,16 +268,32 @@ cp .env.example .env
 # Generate the Prisma client
 npm run prisma:generate
 
-# Push the schema to your database (creates the User/Creator/Donation and
-# AdminAuditLog tables). There is no migrations/ folder in this repo, so use
-# `db push` rather than `prisma:migrate` - it syncs schema.prisma directly to
-# the database. Reconcile historical duplicate on-chain identities before
-# applying the new unique constraint to a populated database.
-npx prisma db push
+# Apply the committed migrations in backend/prisma/migrations to your local
+# database (creates the tables and regenerates the Prisma client)
+npx prisma migrate dev
 
 # Start the development server
 npm run dev
 ```
+
+Schema changes are tracked as Prisma migrations in
+[`backend/prisma/migrations`](backend/prisma/migrations):
+
+- **Local development:** `npx prisma migrate dev` (or `npm run prisma:migrate`)
+  applies pending migrations. After you edit `schema.prisma`, the same command
+  creates a new migration. See
+  [Creating a schema change](backend/README.md#creating-a-schema-change).
+- **Staging and production:** `npx prisma migrate deploy` (or
+  `npm run prisma:deploy`) applies the committed migrations. It never creates
+  migrations or resets data.
+- `npx prisma db push` syncs the schema without recording a migration. Use it
+  only for a throwaway prototype database, never for a database you want to
+  keep or migrate later.
+
+If your local database was created earlier with `db push`, it has no migration
+history. `migrate dev` reports drift and offers to reset the database. For a
+local development database, accept the reset or point `DATABASE_URL` at a
+fresh database.
 
 Backend will run on `http://localhost:4000`. Verify it's up with:
 `curl http://localhost:4000/health` (should return `{"status":"ok",...}`).
@@ -294,18 +310,43 @@ sign-in flow, which requires the backend to be running.
 cd frontend
 npm install
 
-# Create environment file
-touch .env.local
+# Create your environment file from the example
+cp .env.example .env.local
 ```
 
-No environment variables required for local development (frontend uses localhost:4000 API).
+[`frontend/.env.example`](frontend/.env.example) lists every variable the
+frontend reads. Nothing in it is required to start the dev server: without
+`NEXT_PUBLIC_API_URL` the frontend calls `http://localhost:4000`. Donations and
+subscriptions need `NEXT_PUBLIC_DONATION_CONTRACT_ID`, and USDC needs
+`NEXT_PUBLIC_USDC_ISSUER`. See [Frontend (.env.local)](#frontend-envlocal)
+below.
 
 ```bash
 # Start the development server
 npm run dev
 ```
 
-Frontend will run on `http://localhost:3000`
+The frontend runs on **`https://localhost:3000`**. `npm run dev` runs
+`next dev --experimental-https`. The flag was added with the first wallet
+signing flow so that local development uses an HTTPS origin like the deployed
+site (Vercel), which is the origin wallet extensions and OAuth providers see in
+production. Nothing in the code strictly requires HTTPS locally: browsers
+treat `http://localhost` as a secure context (so the clipboard and Web Crypto APIs
+work), the app sets no `Secure` cookies (the session is a JWT sent in the
+`Authorization` header), and Twitter/X accepts `http://localhost` callbacks.
+
+On the first run, Next.js creates a self-signed certificate for `localhost`
+(using [mkcert](https://github.com/FiloSottile/mkcert)) and may ask for your
+password to add its local certificate authority to the system trust store.
+If you skip that step, or your browser does not use the system store, the
+browser shows a certificate warning once. Accept it to continue.
+
+If you can't or don't want to use the certificate, run `npm run dev:http` to
+serve the app on plain `http://localhost:3000`, the same server Playwright
+uses. The backend's development CORS allowlist accepts both origins. Set
+`APP_URL` and `TWITTER_REDIRECT_URI` in `backend/.env` to the `http://` origin
+so that magic links and the Twitter callback point at the server you are
+running.
 
 ## Backend API Endpoints
 
@@ -432,7 +473,7 @@ NEXT_PUBLIC_DONATION_CONTRACT_ID=CD6T563YCSYQHDMXC7VCFTKMWMXWHFHAU4NO7EAMFK57QLF
 # docs/authentication.md for the full walkthrough.
 # TWITTER_CLIENT_ID="..."
 # TWITTER_CLIENT_SECRET="..."
-# TWITTER_REDIRECT_URI="http://localhost:3000/auth/twitter/callback"
+# TWITTER_REDIRECT_URI="https://localhost:3000/auth/twitter/callback"
 
 # Magic link (email) sign-in. Magic links are sent through Resend; without
 # RESEND_API_KEY the message (and link) is logged instead of sent, so the flow
@@ -440,10 +481,13 @@ NEXT_PUBLIC_DONATION_CONTRACT_ID=CD6T563YCSYQHDMXC7VCFTKMWMXWHFHAU4NO7EAMFK57QLF
 # Resend, and APP_URL is the public origin used to build the verification link.
 # RESEND_API_KEY="re_..."
 # EMAIL_FROM="SupportMe <notifications@supportme.app>"
-# APP_URL="http://localhost:3000"
+# APP_URL="https://localhost:3000"
 ```
 
 ### Frontend (.env.local)
+
+Copy [`frontend/.env.example`](frontend/.env.example) to `frontend/.env.local`.
+The key settings are:
 
 ```env
 # v2 (adds recurring donations/subscriptions) - see the contract table above.
@@ -493,9 +537,13 @@ cd frontend
 npm run dev
 ```
 
-Visit `http://localhost:3000` in your browser.
+Visit `https://localhost:3000` in your browser.
 
 ### Testing the Flow
+
+You need a wallet set to **Testnet** and an account funded with
+[Friendbot](https://friendbot.stellar.org). If something fails, see
+[Testnet troubleshooting](docs/testnet-troubleshooting.md).
 
 1. **Connect Wallet**: On the landing page, click "Connect Wallet", pick a wallet, and approve the sign-message request
 2. **Create Username**: First-time sign-ins are redirected to `/auth/username`, choose a unique username
@@ -620,9 +668,14 @@ See `CONTRIBUTING.md` for guidelines on making changes, opening issues, and subm
 
 ## Documentation
 
+The full index, grouped by audience, is in [`docs/README.md`](docs/README.md).
+Key entry points:
+
+- [Testnet Troubleshooting](docs/testnet-troubleshooting.md) - Every wallet, donation and cash-out error, with testnet causes and fixes
 - [Architecture Overview](docs/architecture.md) - System architecture and component interactions
+- [Backend Configuration](backend/docs/CONFIGURATION.md) - Backend environment variables and defaults
 - [Backend API Reference](docs/backend-api-reference.md) - Complete API documentation for all backend endpoints
-- [Contract Upgrade/Migration Strategy](docs/contract-upgrade-migration.md) - Strategy and runbook for contract upgrades
+- [Testing](TESTING.md) - What CI runs and how to run each suite locally
 
 ## Roadmap
 

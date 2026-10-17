@@ -34,11 +34,23 @@ npx playwright install chromium
 npm run test:e2e
 ```
 
-Playwright starts the Next.js development server on port 3000. It can reuse an
-existing local server on that port. CI installs Chromium with its system
+Playwright starts its own Next.js development server with
+`npx next dev -p 3000` (see the `webServer` block in
+[`frontend/playwright.config.ts`](frontend/playwright.config.ts)). This server
+uses plain **HTTP** at `http://localhost:3000`, unlike `npm run dev`, which
+serves `https://localhost:3000` with `--experimental-https`. Playwright can
+reuse an existing local server on that port when not running in CI, but that
+server must answer on `http://localhost:3000`. Stop a running `npm run dev`
+(HTTPS) first, or start the app with `npm run dev:http`.
+`PLAYWRIGHT_BASE_URL` changes the URL the tests open. The web server is still
+started and checked at `http://localhost:3000`. CI installs Chromium with its system
 dependencies using `npx playwright install --with-deps chromium` before running
 the same `npm run test:e2e` command. `npm run lint` is also available locally;
 the current CI workflow does not run the frontend linter.
+
+For errors you see when testing manually against the Stellar testnet (wallet
+network, Friendbot funding, trustlines, contract errors), see
+[`docs/testnet-troubleshooting.md`](docs/testnet-troubleshooting.md).
 
 ## Backend
 

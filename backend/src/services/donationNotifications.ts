@@ -6,7 +6,7 @@ import { emailService } from "./email/emailService";
 import { toAmount } from "../lib/money";
 
 const dashboardUrl = (): string =>
-  `${(process.env.APP_URL || "http://localhost:3000").replace(/\/$/, "")}/app/dashboard`;
+  `${(process.env.APP_URL || "https://localhost:3000").replace(/\/$/, "")}/app/dashboard`;
 
 /**
  * Emails the creator that they received a one-time donation. Returns

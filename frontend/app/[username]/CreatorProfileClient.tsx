@@ -23,7 +23,7 @@ import {
 import { availableAssetCodes, getAsset } from '@/lib/assets';
 import { getPlatform } from '@/lib/socials';
 import { API_URL } from '@/lib/api';
-import { describeDonationFailure } from '@/lib/failures';
+import { describeDonationFailure, type FlowFailure } from '@/lib/failures';
 import { useAuth } from '@/context/AuthContext';
 import { Skeleton } from '@/components/Skeleton';
 import { TipJarLoader } from '@/components/TipJarLoader';
@@ -98,6 +98,23 @@ interface CreatorProfileViewProps {
   username: string;
   locale: ReturnType<typeof useLocalePreference>[0];
   onLocaleChange: ReturnType<typeof useLocalePreference>[1];
+}
+
+/**
+ * Error-toast body for a donation/subscription failure: the explanation and
+ * recovery action from lib/failures, plus a link to the matching section of
+ * docs/testnet-troubleshooting.md. The failure copy itself is English-only
+ * (see lib/failures.ts), so the link label is too.
+ */
+function FailureDescription({ failure }: { failure: FlowFailure }) {
+  return (
+    <>
+      {failure.message} {failure.action}{' '}
+      <a href={failure.docsUrl} target="_blank" rel="noopener noreferrer" className="underline">
+        Learn more<span className="sr-only"> about this error (opens in a new tab)</span>
+      </a>
+    </>
+  );
 }
 
 function CreatorProfileView({ username, locale, onLocaleChange }: CreatorProfileViewProps) {
@@ -393,7 +410,9 @@ function CreatorProfileView({ username, locale, onLocaleChange }: CreatorProfile
       setDonationMessage('');
     } catch (err) {
       const failure = describeDonationFailure(err, 'donate');
-      notify.error(failure.title, `${failure.message} ${failure.action}`);
+      notify.error(failure.title, undefined, {
+        description: <FailureDescription failure={failure} />,
+      });
     } finally {
       setSending(false);
       setTxStatus(null);
@@ -496,7 +515,9 @@ function CreatorProfileView({ username, locale, onLocaleChange }: CreatorProfile
       setDonationMessage('');
     } catch (err) {
       const failure = describeDonationFailure(err, 'subscribe');
-      notify.error(failure.title, `${failure.message} ${failure.action}`);
+      notify.error(failure.title, undefined, {
+        description: <FailureDescription failure={failure} />,
+      });
     } finally {
       setSending(false);
       setTxStatus(null);
