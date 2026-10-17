@@ -238,7 +238,10 @@ only reachable through the `donation` contract's cross-contract calls.
 
 ### Prerequisites
 
-- Node.js 18+
+- Node.js 20 (see [`.nvmrc`](.nvmrc); `nvm use` picks it up automatically) and
+  npm 11+ for the frontend, npm 10+ for the backend (`npm install -g npm@11`
+  if your Node install bundles an older npm — the frontend's lockfile needs
+  npm 11's resolver).
 - PostgreSQL
 - A Stellar wallet browser extension (Freighter, xBull, Albedo, Rabet, or Lobstr)
 
