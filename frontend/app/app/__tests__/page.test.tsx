@@ -56,6 +56,10 @@ describe('AppHubPage', () => {
       token: 'mock-jwt-token',
       loading: false,
       loginWithWallet: vi.fn(),
+      getTwitterRedirectUrl: vi.fn(),
+      completeTwitterLogin: vi.fn(),
+      requestMagicLink: vi.fn(),
+      verifyMagicLink: vi.fn(),
       logout: vi.fn(),
     });
 
@@ -125,5 +129,114 @@ describe('AppHubPage', () => {
     fireEvent.click(closeBtn);
 
     expect(screen.queryByRole('dialog')).not.toBeInTheDocument();
+  });
+
+  describe('Balance privacy masking & localStorage persistence (#152)', () => {
+    it('masks balance by default as •••••• on first visit and shows Show balance button', async () => {
+      render(<AppHubPage />);
+
+      await waitFor(() => {
+        expect(screen.getByText('••••••')).toBeInTheDocument();
+      });
+      expect(screen.queryByText('100')).not.toBeInTheDocument();
+      expect(screen.getByRole('button', { name: 'Show balance' })).toBeInTheDocument();
+      expect(screen.getByRole('button', { name: 'Show balance' })).toHaveTextContent('Show');
+    });
+
+    it('reveals balance upon clicking Show button and saves false to localStorage', async () => {
+      render(<AppHubPage />);
+
+      await waitFor(() => {
+        expect(screen.getByRole('button', { name: 'Show balance' })).toBeInTheDocument();
+      });
+
+      const toggleBtn = screen.getByRole('button', { name: 'Show balance' });
+      fireEvent.click(toggleBtn);
+
+      await waitFor(() => {
+        expect(screen.queryByText('••••••')).not.toBeInTheDocument();
+        expect(screen.getByText('100')).toBeInTheDocument();
+        expect(screen.getByText('XLM')).toBeInTheDocument();
+      });
+
+      expect(screen.getByRole('button', { name: 'Hide balance' })).toBeInTheDocument();
+      expect(screen.getByRole('button', { name: 'Hide balance' })).toHaveTextContent('Hide');
+      expect(localStorage.getItem('balance_hidden')).toBe('false');
+    });
+
+    it('masks balance again upon clicking Hide button and saves true to localStorage', async () => {
+      render(<AppHubPage />);
+
+      await waitFor(() => {
+        expect(screen.getByRole('button', { name: 'Show balance' })).toBeInTheDocument();
+      });
+
+      const showBtn = screen.getByRole('button', { name: 'Show balance' });
+      fireEvent.click(showBtn);
+
+      await waitFor(() => {
+        expect(screen.getByRole('button', { name: 'Hide balance' })).toBeInTheDocument();
+      });
+
+      const hideBtn = screen.getByRole('button', { name: 'Hide balance' });
+      fireEvent.click(hideBtn);
+
+      await waitFor(() => {
+        expect(screen.getByText('••••••')).toBeInTheDocument();
+      });
+      expect(screen.queryByText('100')).not.toBeInTheDocument();
+      expect(screen.getByRole('button', { name: 'Show balance' })).toBeInTheDocument();
+      expect(localStorage.getItem('balance_hidden')).toBe('true');
+    });
+
+    it('restores unmasked balance on visit if user previously chose to show balance', async () => {
+      localStorage.setItem('balance_hidden', 'false');
+
+      render(<AppHubPage />);
+
+      await waitFor(() => {
+        expect(screen.queryByText('••••••')).not.toBeInTheDocument();
+        expect(screen.getByText('100')).toBeInTheDocument();
+        expect(screen.getByRole('button', { name: 'Hide balance' })).toBeInTheDocument();
+      });
+    });
+
+    it('keeps balance masked on visit if user previously set preference to hidden', async () => {
+      localStorage.setItem('balance_hidden', 'true');
+
+      render(<AppHubPage />);
+
+      await waitFor(() => {
+        expect(screen.getByText('••••••')).toBeInTheDocument();
+      });
+      expect(screen.queryByText('100')).not.toBeInTheDocument();
+      expect(screen.getByRole('button', { name: 'Show balance' })).toBeInTheDocument();
+    });
+
+    it('handles localStorage errors gracefully without crashing', async () => {
+      const getItemSpy = vi.spyOn(Storage.prototype, 'getItem').mockImplementation(() => {
+        throw new Error('Storage access denied');
+      });
+      const setItemSpy = vi.spyOn(Storage.prototype, 'setItem').mockImplementation(() => {
+        throw new Error('Quota exceeded');
+      });
+
+      render(<AppHubPage />);
+
+      await waitFor(() => {
+        expect(screen.getByText('••••••')).toBeInTheDocument();
+      });
+
+      const toggleBtn = screen.getByRole('button', { name: 'Show balance' });
+      fireEvent.click(toggleBtn);
+
+      await waitFor(() => {
+        expect(screen.queryByText('••••••')).not.toBeInTheDocument();
+        expect(screen.getByText('100')).toBeInTheDocument();
+      });
+
+      getItemSpy.mockRestore();
+      setItemSpy.mockRestore();
+    });
   });
 });
