@@ -6,6 +6,10 @@ import { asyncHandler } from "../middleware/asyncHandler";
 import { validate } from "../middleware/validate";
 import { listAdminAuditQuerySchema } from "../schemas/admin";
 import { recordAdminActionSafely, adminAuditMiddleware } from "../services/adminAuditLog";
+import { sorobanEventListener } from "../services/sorobanEventListener";
+import { subscriptionExecutor } from "../services/subscriptionExecutor";
+import { networkReset } from "../services/networkReset";
+import { log } from "../lib/logger";
 import { toAmount } from "../lib/money";
 
 const router = Router();
@@ -134,6 +138,55 @@ router.get(
   "/audit-log",
   validate({ query: listAdminAuditQuerySchema }),
   listAuditLogs
+);
+
+// Operator recovery after a Stellar testnet reset (#278). Once the contracts
+// have been redeployed and the env contract IDs updated (then the backend
+// restarted, so the new env is in effect), this drops the stale event cursor,
+// deactivates subscriptions that only existed on the old chain, clears the
+// reset state/checkpoint, and resumes the background workers. See the runbook
+// in docs/testnet-troubleshooting.md.
+router.post(
+  "/network-resync",
+  asyncHandler(async (req: AuthRequest, res) => {
+    sorobanEventListener.resetCursor();
+
+    const deactivated = await prisma.subscription.updateMany({
+      where: { active: true },
+      data: {
+        active: false,
+        lastError:
+          "Stellar network was reset — this subscription no longer exists on-chain. " +
+          "Re-subscribe from the creator's page after the contracts are redeployed.",
+      },
+    });
+
+    await networkReset.clearAfterResync();
+
+    // Resume against the redeployed contracts. A worker that cannot start
+    // (e.g. the env wasn't updated/restarted) is logged rather than failing the
+    // resync, so the state is still cleared and the operator can retry.
+    try {
+      sorobanEventListener.start();
+      subscriptionExecutor.start();
+    } catch (error) {
+      log("error", "Network resync could not restart background workers", {
+        error: (error as Error).message,
+      });
+    }
+
+    await recordAdminActionSafely(req, {
+      action: "admin.network.resync",
+      targetType: "network",
+      targetId: "soroban",
+      after: { deactivatedSubscriptions: deactivated.count },
+    });
+
+    return res.json({
+      ok: true,
+      deactivatedSubscriptions: deactivated.count,
+    });
+  })
 );
 
 export default router;

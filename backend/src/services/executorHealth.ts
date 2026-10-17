@@ -1,3 +1,5 @@
+import { getExecutorLowBalanceXlm } from "./stellarNetwork";
+
 export interface ChargeOutcome {
   at: string;
   subscriptionId: number;
@@ -15,6 +17,11 @@ export interface ExecutorHealthReport {
   lastRunError: string | null;
   expectedIntervalMs: number;
   msSinceLastRun: number | null;
+  // Executor account funding (#279): XLM balance from the account's ledger
+  // entry, plus a lowBalance flag against EXECUTOR_LOW_BALANCE_XLM so an
+  // operator sees a starved fee wallet before charges start failing.
+  balanceXlm: string | null;
+  lowBalance: boolean;
   recentCharges: {
     successCount: number;
     failureCount: number;
@@ -41,6 +48,7 @@ class ExecutorHealthTracker {
   private lastRunError: string | null = null;
   private expectedIntervalMs = DEFAULT_EXPECTED_INTERVAL_MS;
   private recentOutcomes: ChargeOutcome[] = [];
+  private balanceXlm: string | null = null;
 
   markEnabled(expectedIntervalMs?: number): void {
     this.enabled = true;
@@ -54,6 +62,11 @@ class ExecutorHealthTracker {
   markDisabled(): void {
     this.enabled = false;
     this.startedAt = null;
+  }
+
+  /** Records the executor account's XLM balance (null when unreadable). */
+  setBalance(balanceXlm: string | null): void {
+    this.balanceXlm = balanceXlm;
   }
 
   runStarted(): void {
@@ -80,6 +93,7 @@ class ExecutorHealthTracker {
     this.lastRunError = null;
     this.expectedIntervalMs = DEFAULT_EXPECTED_INTERVAL_MS;
     this.recentOutcomes = [];
+    this.balanceXlm = null;
   }
 
   recordCharge(subscriptionId: number, status: ChargeOutcome["status"], error?: string): void {
@@ -106,6 +120,7 @@ class ExecutorHealthTracker {
     }
 
     const outcomes = [...this.recentOutcomes];
+    const lowBalanceThresholdXlm = getExecutorLowBalanceXlm();
     return {
       status,
       enabled: this.enabled,
@@ -116,6 +131,9 @@ class ExecutorHealthTracker {
       lastRunError: this.lastRunError,
       expectedIntervalMs: this.expectedIntervalMs,
       msSinceLastRun,
+      balanceXlm: this.balanceXlm,
+      lowBalance:
+        this.balanceXlm != null && Number(this.balanceXlm) < lowBalanceThresholdXlm,
       recentCharges: {
         successCount: outcomes.filter((o) => o.status === "success").length,
         failureCount: outcomes.filter((o) => o.status === "failure").length,

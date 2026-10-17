@@ -44,8 +44,9 @@ per-IP limits use the caller's address behind a trusted proxy.
 
 | Variable | Required? | Default / behavior |
 | --- | --- | --- |
+| `STELLAR_NETWORK` | Optional; set explicitly outside testnet. | `testnet` (also accepts `mainnet`/`public`, `futurenet`). Selects the network passphrase used by the executor and boot validation. `NEXT_PUBLIC_STELLAR_NETWORK` is accepted as a fallback so frontend and backend share one value. At boot the server calls `getNetwork` on every RPC endpoint and refuses to start (production) if a passphrase disagrees, a configured contract is missing, or `EXECUTOR_SECRET_KEY` is unparseable (#281). |
 | `NEXT_PUBLIC_DONATION_CONTRACT_ID` | Required for a normal backend startup and required by production configuration validation. | None. The event listener skips polling without it, and the subscription executor cannot start without it. |
-| `NEXT_PUBLIC_CREATOR_REGISTRY_CONTRACT_ID` | Optional. | Unset; the listener watches the donation contract only. Set the registry address to include it in listener monitoring. |
+| `NEXT_PUBLIC_CREATOR_REGISTRY_CONTRACT_ID` | Optional. | Unset; the listener watches the donation contract only. Set the registry address to include it in listener monitoring; it is also verified at boot. |
 | `SOROBAN_RPC_URLS` | Optional; preferred for the RPC client pool. | If unset, endpoint selection falls through to `SOROBAN_RPC_ENDPOINTS`, then `SOROBAN_RPC_URL`, then the public testnet endpoint. Accepts a comma-separated priority list. |
 | `SOROBAN_RPC_ENDPOINTS` | Optional compatibility alias. | Used only when `SOROBAN_RPC_URLS` is unset; comma-separated priority list. |
 | `SOROBAN_RPC_URL` | Optional legacy/single endpoint. | `https://soroban-testnet.stellar.org`. It is the final fallback for the shared RPC client and is also read directly by the event listener. |
@@ -63,9 +64,11 @@ as well if the listener needs a non-default endpoint.
 
 | Variable | Required? | Default / behavior |
 | --- | --- | --- |
-| `EXECUTOR_SECRET_KEY` | Required for normal backend startup because the subscription executor is started with the server. | None. This operational Stellar key must be registered as the donation contract executor and funded for transaction fees. Do not reuse a user wallet or commit the secret. |
+| `EXECUTOR_SECRET_KEY` | Required for normal backend startup because the subscription executor is started with the server. | None. This operational Stellar key must be registered as the donation contract executor and funded for transaction fees. Do not reuse a user wallet or commit the secret. On testnet/futurenet a missing account is auto-funded via Friendbot at startup (#279). |
 | `SUBSCRIPTION_EXECUTOR_POLL_INTERVAL_MS` | Optional. | `60000` ms. |
 | `SUBSCRIPTION_EXECUTOR_EXPECTED_INTERVAL_MS` | Optional. | Three times the polling interval, or `180000` ms with the default poll interval. Used by executor health reporting. |
+| `FRIENDBOT_URL` | Optional. | `https://friendbot.stellar.org`. Endpoint used to auto-fund a missing executor account on testnet/futurenet; never called on mainnet. |
+| `EXECUTOR_LOW_BALANCE_XLM` | Optional. | `0.5`. XLM balance below which `/health/executor` reports `lowBalance: true`. |
 | `GOAL_RESET_CHECK_INTERVAL_MS` | Optional. | `3600000` ms (one hour). |
 
 ## Admin access
@@ -90,7 +93,7 @@ as well if the listener needs a non-default endpoint.
 | `EMAIL_FROM` | Optional. | `SupportMe <notifications@supportme.app>`. Use a sender verified with Resend in deployed environments. |
 | `APP_URL` | Optional locally; set to the canonical public frontend URL in staging and production. | Context-dependent: some email/SEO paths fall back to `https://supportme.app`, while magic-link, notification and preview paths fall back to `https://localhost:3000` (the frontend's local HTTPS dev origin). Set it explicitly outside local development so generated links point to the right environment. |
 | `RESEND_WEBHOOK_SECRET` | Optional for the app; required to accept Resend webhook requests. | Unset; webhook requests are rejected when no signing secret is configured. |
-| `NEXT_PUBLIC_STELLAR_NETWORK` | Optional. | `TESTNET`; used to select the network label/link in email templates. |
+| `NEXT_PUBLIC_STELLAR_NETWORK` | Optional. | `TESTNET`; used to select the network label/link in email templates and as a fallback for the backend's `STELLAR_NETWORK`. |
 
 ## Observability
 

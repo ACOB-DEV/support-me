@@ -12,6 +12,7 @@ import { log } from "./lib/logger";
 
 export const config = {
   get donationContractId() { return process.env.NEXT_PUBLIC_DONATION_CONTRACT_ID?.trim() || ""; },
+  get creatorRegistryContractId() { return process.env.NEXT_PUBLIC_CREATOR_REGISTRY_CONTRACT_ID?.trim() || ""; },
   get executorSecretKey() { return process.env.EXECUTOR_SECRET_KEY?.trim() || ""; },
   get databaseUrl() { return process.env.DATABASE_URL?.trim() || ""; },
   get jwtSecret() { return process.env.JWT_SECRET?.trim() || ""; },
