@@ -11,7 +11,18 @@ import { log } from "./lib/logger";
  */
 
 export const config = {
-  get donationContractId() { return process.env.NEXT_PUBLIC_DONATION_CONTRACT_ID?.trim() || ""; },
+  // DONATION_CONTRACT_ID is the backend-scoped name (#302); NEXT_PUBLIC_
+  // is a Next.js client-bundling prefix that means nothing server-side and
+  // is misleading here. Falls back to the old NEXT_PUBLIC_-prefixed name for
+  // backward compat with deployments that still have only that one set --
+  // remove the fallback once those are confirmed migrated.
+  get donationContractId() {
+    return (
+      process.env.DONATION_CONTRACT_ID?.trim() ||
+      process.env.NEXT_PUBLIC_DONATION_CONTRACT_ID?.trim() ||
+      ""
+    );
+  },
   get executorSecretKey() { return process.env.EXECUTOR_SECRET_KEY?.trim() || ""; },
   get databaseUrl() { return process.env.DATABASE_URL?.trim() || ""; },
   get jwtSecret() { return process.env.JWT_SECRET?.trim() || ""; },
@@ -76,7 +87,7 @@ export function getRateLimitConfig(): RateLimitConfig {
 export function validateConfig() {
   const missing: string[] = [];
 
-  if (!config.donationContractId) missing.push("NEXT_PUBLIC_DONATION_CONTRACT_ID");
+  if (!config.donationContractId) missing.push("DONATION_CONTRACT_ID");
   if (!config.executorSecretKey) missing.push("EXECUTOR_SECRET_KEY");
   if (!config.databaseUrl) missing.push("DATABASE_URL");
 
