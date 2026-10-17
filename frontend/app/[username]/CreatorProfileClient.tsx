@@ -506,7 +506,7 @@ function CreatorProfileView({ username, locale, onLocaleChange }: CreatorProfile
 
   if (loading) {
     return (
-      <div className="min-h-screen bg-background py-10 px-4">
+      <div className="min-h-screen bg-background py-10 px-4" aria-busy="true">
         <div className="max-w-md mx-auto">
           <div className="card-brutal p-8 text-center">
             <Skeleton className="h-24 w-24 rounded-full mx-auto mb-4" />
@@ -697,7 +697,7 @@ function CreatorProfileView({ username, locale, onLocaleChange }: CreatorProfile
             <div className="py-2">
               <TipJarLoader fullScreen={false} />
               {(subscribeStep || (txStatus && statusLabels[txStatus])) && (
-                <p className="text-sm text-ink text-center animate-pulse font-bold mt-2">
+                <p className="text-sm text-ink text-center motion-safe:animate-pulse font-bold mt-2">
                   {subscribeStep ?? statusLabels[txStatus as string]}
                 </p>
               )}

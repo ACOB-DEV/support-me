@@ -30,7 +30,7 @@ describe('ActivitySkeleton', () => {
     const tableCard = container.querySelectorAll('.card-brutal');
     expect(tableCard.length).toBeGreaterThanOrEqual(4);
 
-    const pulsingElements = container.querySelectorAll('.animate-pulse');
+    const pulsingElements = container.querySelectorAll('.motion-safe\\:animate-pulse');
     expect(pulsingElements.length).toBeGreaterThan(15);
   });
 

@@ -209,3 +209,28 @@ input[type="number"] {
     transform: rotate(-14deg) translateX(-4px);
   }
 }
+
+/* Reduced motion (WCAG 2.3.3). Pure CSS so it applies before any JS runs —
+   TipJar also checks matchMedia, but only after hydration. Keyframe
+   animations are stopped and transitions made effectively instant;
+   Tailwind's motion-safe: variants keep pulses/spinners off as well. */
+@media (prefers-reduced-motion: reduce) {
+  .tipjar-drop,
+  .tipjar-hand-release {
+    animation: none;
+  }
+  /* Without its fall animation the in-flight coin would just hang above the
+     jar, so hide it; the jar renders full instead (see TipJar.tsx). */
+  .tipjar-drop {
+    opacity: 0;
+  }
+
+  *,
+  *::before,
+  *::after {
+    animation-duration: 0.01ms !important;
+    animation-iteration-count: 1 !important;
+    transition-duration: 0.01ms !important;
+    scroll-behavior: auto !important;
+  }
+}

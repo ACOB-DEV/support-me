@@ -577,7 +577,7 @@ export default function DashboardPage() {
                   data-testid="donations-loading-indicator"
                   className="p-3 bg-brand-light-purple/20 border-2 border-dashed border-ink/20 rounded-lg flex items-center justify-center gap-2 text-sm font-bold text-ink"
                 >
-                  <div className="w-4 h-4 border-2 border-brand-purple border-t-transparent rounded-full animate-spin" />
+                  <div aria-hidden="true" className="w-4 h-4 border-2 border-brand-purple border-t-transparent rounded-full motion-safe:animate-spin" />
                   <span>Loading older donations…</span>
                 </div>
               </div>

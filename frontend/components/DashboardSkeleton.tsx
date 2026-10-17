@@ -8,7 +8,7 @@ export interface DashboardSkeletonProps {
 
 export function DashboardSkeleton({ showNav = true }: DashboardSkeletonProps) {
   return (
-    <div className="min-h-screen bg-background" data-testid="dashboard-skeleton">
+    <div className="min-h-screen bg-background" data-testid="dashboard-skeleton" aria-busy="true">
       {showNav && <AppNav />}
       <div className="max-w-6xl mx-auto px-4 sm:px-6 lg:px-8 py-10">
         {/* Header: Title and Share button */}
