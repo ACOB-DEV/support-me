@@ -295,15 +295,46 @@ function CreatorProfileView({ username, locale, onLocaleChange }: CreatorProfile
 
   // Read the connected wallet's balance for whichever asset is selected. Falls
   // back to null when the wallet holds no trustline/balance for it.
-  const loadAssetBalance = async (address: string, code: string) => {
+  const loadAssetBalance = useCallback(async (address: string, code: string) => {
     try {
       const account = await server.loadAccount(address);
-      const match = account.balances.find(getAsset(code).balanceMatcher);
+      const asset = getAsset(code);
+      let match;
+      if (code === 'XLM') {
+        match = account.balances.find(
+          (b: { asset_type?: string }) => b.asset_type === 'native'
+        );
+      } else {
+        match = account.balances.find((b: { asset_type?: string; asset_code?: string }) => {
+          if (b.asset_type === 'native') return false;
+          if (asset && asset.code === code && typeof asset.balanceMatcher === 'function') {
+            return asset.balanceMatcher(b);
+          }
+          return b.asset_code === code;
+        });
+      }
       return parseFloat((match as { balance?: string })?.balance || '0').toFixed(4);
     } catch {
       return null;
     }
-  };
+  }, []);
+
+  // Keep displayed balance in sync with connected wallet and selected asset.
+  useEffect(() => {
+    if (!userAddress) {
+      setBalance(null);
+      return;
+    }
+    let cancelled = false;
+    loadAssetBalance(userAddress, assetCode).then((bal) => {
+      if (!cancelled) {
+        setBalance(bal);
+      }
+    });
+    return () => {
+      cancelled = true;
+    };
+  }, [userAddress, assetCode, loadAssetBalance]);
 
   const handleConnectWallet = async () => {
     setConnecting(true);
@@ -583,8 +614,11 @@ function CreatorProfileView({ username, locale, onLocaleChange }: CreatorProfile
   const layout = THEME_LAYOUTS[creator.theme?.layout ?? 'default'];
 
   return (
-    <div className="min-h-screen bg-background py-10 px-4">
-      <main id="main-content" className="max-w-md mx-auto space-y-6">
+    <div
+      className={`min-h-screen bg-background px-4 ${layout.page}`}
+      style={creator.theme ? themeStyle(creator.theme) : undefined}
+    >
+      <main id="main-content" className={`max-w-md mx-auto ${layout.column}`}>
         {/* Creator header */}
         <div className="card-brutal p-8 text-center">
           <div className="w-24 h-24 mx-auto mb-4 rounded-full border-4 border-ink overflow-hidden bg-accent-bg flex items-center justify-center">
@@ -750,9 +784,12 @@ function CreatorProfileView({ username, locale, onLocaleChange }: CreatorProfile
                       <button
                         key={code}
                         onClick={async () => {
+                          if (code === assetCode) return;
                           setAssetCode(code);
                           if (userAddress) {
-                            setBalance(await loadAssetBalance(userAddress, code));
+                            setBalance(null);
+                            const nextBal = await loadAssetBalance(userAddress, code);
+                            setBalance(nextBal);
                           }
                         }}
                         aria-pressed={assetCode === code}
