@@ -50,13 +50,13 @@ describe('SEO & Robots Directives', () => {
     expect(rules.disallow).toContain('/activity');
     expect(rules.disallow).toContain('/app');
     expect(rules.allow).toContain('/');
-    expect(rules.allow).toContain('/donate');
+    expect(rules.allow).not.toContain('/donate');
   });
 
   it('generates valid sitemap for public routes', () => {
     const map = sitemap();
     expect(map.length).toBeGreaterThan(0);
     expect(map.some((entry) => entry.url.endsWith('/'))).toBe(true);
-    expect(map.some((entry) => entry.url.endsWith('/donate'))).toBe(true);
+    expect(map.some((entry) => entry.url.endsWith('/donate'))).toBe(false);
   });
 });
