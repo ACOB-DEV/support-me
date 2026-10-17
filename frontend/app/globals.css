@@ -143,6 +143,11 @@ input[type="number"] {
   .btn-brutal-lime {
     @apply bg-brand-lime text-ink;
   }
+  /* Destructive actions (ConfirmDialog). Text stays near-black in both
+     themes — the light dark-mode ink would wash out on the pink. */
+  .btn-brutal-danger {
+    @apply bg-brand-pink text-[#0a0a0a];
+  }
 
   .input-brutal {
     @apply w-full px-4 py-3 bg-input text-foreground
