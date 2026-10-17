@@ -548,7 +548,10 @@ mod tests {
         let username = String::from_bytes(&env, b"awesome_dev");
         client.register_creator(&creator, &username);
         let res = client.try_register_creator(&creator, &username);
-        assert_eq!(res.unwrap_err().unwrap(), RegistryError::AlreadyRegistered);
+        assert_eq!(
+            res.unwrap_err().unwrap(),
+            RegistryError::AlreadyRegistered.into()
+        );
     }
 
     #[test]
@@ -590,7 +593,7 @@ mod tests {
         let res = client.try_record_donation(&impostor, &creator, &1000);
         assert_eq!(
             res.unwrap_err().unwrap(),
-            RegistryError::CallerNotAuthorized
+            RegistryError::CallerNotAuthorized.into()
         );
     }
 
@@ -606,7 +609,10 @@ mod tests {
 
         client.initialize(&admin, &donation_contract);
         let res = client.try_initialize(&admin, &donation_contract);
-        assert_eq!(res.unwrap_err().unwrap(), RegistryError::AlreadyInitialized);
+        assert_eq!(
+            res.unwrap_err().unwrap(),
+            RegistryError::AlreadyInitialized.into()
+        );
     }
 
     #[test]
@@ -692,6 +698,6 @@ mod tests {
         client.initialize(&admin, &donation_contract);
         client.record_donation(&donation_contract, &creator, &i128::MAX);
         let res = client.try_record_donation(&donation_contract, &creator, &1);
-        assert_eq!(res.unwrap_err().unwrap(), RegistryError::Overflow);
+        assert_eq!(res.unwrap_err().unwrap(), RegistryError::Overflow.into());
     }
 }

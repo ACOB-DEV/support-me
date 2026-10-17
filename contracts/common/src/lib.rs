@@ -21,7 +21,7 @@ pub struct DonationRecord {
     pub timestamp: u64,
 }
 
-#[derive(Clone)]
+#[derive(Clone, Debug, Eq, PartialEq)]
 #[contracttype]
 pub struct CreatorProfile {
     pub address: Address,
@@ -35,7 +35,7 @@ pub struct CreatorProfile {
 /// allowance (via the token contract's own `approve`) covering `amount` per
 /// `interval_secs`; the donation contract then draws on that allowance via
 /// `transfer_from` once per interval, on or after `next_charge_at`.
-#[derive(Clone)]
+#[derive(Clone, Debug, Eq, PartialEq)]
 #[contracttype]
 pub struct Subscription {
     pub supporter: Address,
