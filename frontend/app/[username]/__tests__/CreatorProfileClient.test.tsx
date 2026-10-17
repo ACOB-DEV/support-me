@@ -202,6 +202,10 @@ describe('CreatorProfileClient', () => {
       token: null,
       loading: false,
       loginWithWallet: vi.fn(),
+      getTwitterRedirectUrl: vi.fn(),
+      completeTwitterLogin: vi.fn(),
+      requestMagicLink: vi.fn(),
+      verifyMagicLink: vi.fn(),
       logout: vi.fn(),
     });
     vi.stubGlobal('EventSource', FakeEventSource as unknown as typeof EventSource);

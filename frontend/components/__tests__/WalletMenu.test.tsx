@@ -5,7 +5,7 @@ import { WalletMenu } from '@/components/WalletMenu';
 const pathname = vi.hoisted(() => ({ current: '/app' }));
 const logout = vi.hoisted(() => vi.fn());
 const mockUser = vi.hoisted(() => ({
-  current: { walletAddress: 'GABCDEFGHIJKLMNOPQRSTUVWXYZ234567ABCDEFGHIJKLMNOPQRSTUV', email: null as string | null },
+  current: { walletAddress: 'GABCDEFGHIJKLMNOPQRSTUVWXYZ234567ABCDEFGHIJKLMNOPQRSTUV' as string | null, email: null as string | null },
 }));
 
 vi.mock('next/navigation', () => ({
