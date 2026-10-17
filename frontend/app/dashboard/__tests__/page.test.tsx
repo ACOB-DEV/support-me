@@ -3,6 +3,7 @@ import { forwardRef } from 'react';
 import { render, screen, waitFor, act, fireEvent } from '@testing-library/react';
 import DashboardPage from '@/app/dashboard/page';
 import { useAuth } from '@/context/AuthContext';
+import { useCreator } from '@/context/CreatorContext';
 import { toast } from 'sonner';
 
 // jsdom has no real <canvas> implementation. The empty-state CTA opens the
@@ -31,6 +32,12 @@ vi.mock('qrcode.react', () => {
 vi.mock('@/context/AuthContext', () => ({
   useAuth: vi.fn(),
 }));
+
+vi.mock('@/context/CreatorContext', () => ({
+  useCreator: vi.fn(),
+}));
+
+const mockUseCreator = vi.mocked(useCreator);
 
 vi.mock('next/link', () => ({
   default: ({ href, children, ...props }: React.ComponentProps<'a'> & { href: string }) => (
@@ -167,11 +174,20 @@ function mockFetchByUrl({
   donations?: unknown | ((url: string) => Response | Promise<Response>);
   withdrawals?: unknown;
 }) {
+  if (creatorNotFound) {
+    mockUseCreator.mockReturnValue({ creator: null, loading: false, invalidate: vi.fn() });
+  } else if (creator !== undefined) {
+    mockUseCreator.mockReturnValue({ creator: creator as any, loading: false, invalidate: vi.fn() });
+  }
+
   vi.mocked(fetch).mockImplementation((input: RequestInfo | URL) => {
     const url = typeof input === 'string' ? input : input.toString();
     // Check withdrawals before creators: both contain no overlapping substring,
     // but keep the donations/withdrawals checks ahead of the bare /api/creators.
     if (url.includes('/api/withdrawals')) return Promise.resolve(jsonResponse(withdrawals ?? []));
+    if (url.includes('/api/creators/me/stats')) {
+      return Promise.resolve(jsonResponse({ donationCount: 0, uniqueSupporters: 0, currencies: [] }));
+    }
     if (url.includes('/api/creators/me')) {
       if (creatorNotFound) {
         return Promise.resolve(jsonResponse({ error: 'Creator not found' }, false, 404));
@@ -200,6 +216,11 @@ describe('DashboardPage', () => {
       loginWithWallet: vi.fn(),
       logout: vi.fn(),
     });
+    mockUseCreator.mockReturnValue({
+      creator,
+      loading: false,
+      invalidate: vi.fn(),
+    });
     FakeEventSource.instances = [];
     vi.stubGlobal('EventSource', FakeEventSource);
     FakeIntersectionObserver.instances = [];
@@ -213,6 +234,7 @@ describe('DashboardPage', () => {
   });
 
   it('shows a skeleton while the dashboard data is loading', () => {
+    mockUseCreator.mockReturnValue({ creator: null, loading: true, invalidate: vi.fn() });
     vi.mocked(fetch).mockReturnValue(new Promise(() => {})); // never resolves
 
     const { container } = render(<DashboardPage />);
