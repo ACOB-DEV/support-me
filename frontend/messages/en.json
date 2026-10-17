@@ -75,6 +75,7 @@
     }
   },
   "languageSwitcher": {
-    "label": "Language"
+    "label": "Language",
+    "scopeNote": "Translates this profile and the donation form only. Other pages stay in English."
   }
 }

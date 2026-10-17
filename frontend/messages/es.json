@@ -75,6 +75,7 @@
     }
   },
   "languageSwitcher": {
-    "label": "Idioma"
+    "label": "Idioma",
+    "scopeNote": "Solo se traducen este perfil y el formulario de donación. Las demás páginas siguen en inglés."
   }
 }

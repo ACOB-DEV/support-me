@@ -28,7 +28,7 @@ import { useAuth } from '@/context/AuthContext';
 import { Skeleton } from '@/components/Skeleton';
 import { TipJarLoader } from '@/components/TipJarLoader';
 import { LanguageSwitcher } from '@/components/LanguageSwitcher';
-import { getMessages, useLocalePreference } from '@/lib/i18n';
+import { getMessages, useDocumentLang, useLocalePreference, type Locale } from '@/lib/i18n';
 import { THEME_LAYOUTS, themeStyle, type ProfileTheme } from '@/lib/theme';
 
 
@@ -71,13 +71,25 @@ interface Goal {
   recurring: boolean;
 }
 
-export default function CreatorProfileClient({ params }: { params: Promise<{ username: string }> }) {
+export default function CreatorProfileClient({
+  params,
+  initialLocale,
+}: {
+  params: Promise<{ username: string }>;
+  /** Locale from the `supportme_locale` cookie, read server-side by page.tsx. */
+  initialLocale?: Locale;
+}) {
   const { username } = use(params);
-  const [locale, setLocale] = useLocalePreference();
+  const [locale, setLocale] = useLocalePreference(initialLocale);
+  useDocumentLang(locale);
 
   return (
     <NextIntlClientProvider locale={locale} messages={getMessages(locale)}>
-      <CreatorProfileView username={username} locale={locale} onLocaleChange={setLocale} />
+      {/* lang on the translated region too, so it is correct on first paint
+          even before useDocumentLang's effect updates <html lang>. */}
+      <div lang={locale}>
+        <CreatorProfileView username={username} locale={locale} onLocaleChange={setLocale} />
+      </div>
     </NextIntlClientProvider>
   );
 }
