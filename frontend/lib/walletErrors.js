@@ -14,7 +14,7 @@ export const WALLET_CATEGORY = {
 };
 
 // Install targets shown when no wallet is detected. URLs match each module's
-// own product page from @creit-tech/stellar-wallets-kit.
+// own product page from @creit.tech/stellar-wallets-kit.
 export const WALLET_INSTALL_LINKS = [
   {
     name: 'Freighter',
