@@ -29,12 +29,28 @@ const server = new StellarSdk.rpc.Server(RPC_URL);
 const CONFIRMATION_WINDOW_MS = 30_000;
 const CONFIRMATION_POLL_MS = 1_500;
 
+/** Status callback stage fired at each step of the build -> simulate -> sign -> submit -> poll pipeline. */
+export type ContractCallStatus =
+  | 'building'
+  | 'simulating'
+  | 'awaiting-signature'
+  | 'submitting'
+  | 'pending'
+  | 'success';
+
+export type OnStatus = (status: ContractCallStatus) => void;
+
 // Error types the UI can distinguish between:
 // - 'wallet'     wallet not connected / user rejected or failed to sign
 // - 'simulation' bad input, insufficient balance, contract precondition failure
 // - 'network'    RPC/network unreachable, submission or confirmation failure
+export type DonationErrorType = 'wallet' | 'simulation' | 'network';
+
 export class DonationError extends Error {
-  constructor(type, message, cause) {
+  type: DonationErrorType;
+  cause?: unknown;
+
+  constructor(type: DonationErrorType, message: string, cause?: unknown) {
     super(message);
     this.type = type;
     this.cause = cause;
@@ -46,16 +62,29 @@ export class DonationError extends Error {
  * throwing a typed DonationError instead of producing NaN/Infinity that
  * later blows up as an opaque "Cannot convert NaN to a BigInt" from BigInt().
  *
- * @param {string|number} amount
- * @param {number} [multiplier] extra factor, e.g. periodsToApprove
- * @returns {bigint}
+ * @param multiplier extra factor, e.g. periodsToApprove
  */
-function toStroops(amount, multiplier = 1) {
-  const value = parseFloat(amount);
+function toStroops(amount: string | number, multiplier = 1): bigint {
+  const value = parseFloat(String(amount));
   if (!Number.isFinite(value) || value <= 0) {
     throw new DonationError('simulation', 'Enter a valid amount greater than 0.');
   }
   return BigInt(Math.round(value * multiplier * 1e7));
+}
+
+interface CallContractParams {
+  /** Defaults to the donation contract. */
+  contractId?: string;
+  method: string;
+  /** Pre-built ScVal arguments. */
+  args: StellarSdk.xdr.ScVal[];
+  signerAddress: string;
+  onStatus?: OnStatus;
+}
+
+interface CallContractResult {
+  hash: string;
+  returnValue: unknown;
 }
 
 /**
@@ -63,16 +92,14 @@ function toStroops(amount, multiplier = 1) {
  * contract invocation, used by every function below. Centralizes the
  * status-callback stages and error typing so `sendDonation`, `subscribe`,
  * `approveAllowance`, and `cancelSubscription` all fail the same way.
- *
- * @param {object} params
- * @param {string} params.contractId defaults to the donation contract
- * @param {string} params.method
- * @param {unknown[]} params.args pre-built ScVal arguments
- * @param {string} params.signerAddress
- * @param {(status: string) => void} [params.onStatus]
- * @returns {Promise<{ hash: string, returnValue: unknown }>}
  */
-async function callContract({ contractId = CONTRACT_ID, method, args, signerAddress, onStatus }) {
+async function callContract({
+  contractId = CONTRACT_ID,
+  method,
+  args,
+  signerAddress,
+  onStatus,
+}: CallContractParams): Promise<CallContractResult> {
   if (!contractId) {
     throw new DonationError(
       'simulation',
@@ -82,7 +109,7 @@ async function callContract({ contractId = CONTRACT_ID, method, args, signerAddr
 
   onStatus?.('building');
 
-  let account;
+  let account: StellarSdk.Account;
   try {
     account = await server.getAccount(signerAddress);
   } catch (err) {
@@ -95,7 +122,7 @@ async function callContract({ contractId = CONTRACT_ID, method, args, signerAddr
 
   const contract = new StellarSdk.Contract(contractId);
 
-  let tx;
+  let tx: StellarSdk.Transaction;
   try {
     tx = new StellarSdk.TransactionBuilder(account, {
       fee: StellarSdk.BASE_FEE,
@@ -110,19 +137,20 @@ async function callContract({ contractId = CONTRACT_ID, method, args, signerAddr
 
   onStatus?.('simulating');
 
-  let prepared;
+  let prepared: StellarSdk.Transaction;
   try {
     prepared = await server.prepareTransaction(tx);
   } catch (err) {
-    const message = /insufficient|underfunded/i.test(err?.message || '')
+    const message = /insufficient|underfunded/i.test((err as Error)?.message || '')
       ? 'Insufficient balance or allowance to complete this action.'
-      : err?.message || 'The transaction could not be simulated. Check the amount and try again.';
+      : (err as Error)?.message ||
+        'The transaction could not be simulated. Check the amount and try again.';
     throw new DonationError('simulation', message, err);
   }
 
   onStatus?.('awaiting-signature');
 
-  let signedResult;
+  let signedResult: { signedTxXdr: string; signerAddress?: string };
   try {
     signedResult = await signWithWallet(prepared.toXDR(), signerAddress);
   } catch (err) {
@@ -136,11 +164,11 @@ async function callContract({ contractId = CONTRACT_ID, method, args, signerAddr
   const signedTx = StellarSdk.TransactionBuilder.fromXDR(
     signedResult.signedTxXdr,
     NETWORK_PASSPHRASE
-  );
+  ) as StellarSdk.Transaction;
 
   onStatus?.('submitting');
 
-  let sendResponse;
+  let sendResponse: StellarSdk.rpc.Api.SendTransactionResponse;
   try {
     // Retried on transient failures only. Re-submitting is safe here: the
     // transaction is already signed and has a fixed hash, so a retry is a
@@ -160,7 +188,7 @@ async function callContract({ contractId = CONTRACT_ID, method, args, signerAddr
   onStatus?.('pending');
 
   const hash = sendResponse.hash;
-  const readTransaction = () =>
+  const readTransaction = (): Promise<StellarSdk.rpc.Api.GetTransactionResponse> =>
     withRetry('getTransaction', () => server.getTransaction(hash), { onRetry: reportRetry });
 
   let getResponse = await readTransaction();
@@ -189,33 +217,65 @@ async function callContract({ contractId = CONTRACT_ID, method, args, signerAddr
   throw new DonationError('network', 'Transaction failed on the network.', getResponse);
 }
 
+interface MockContract {
+  sendDonation?: (params: SendDonationParams) => Promise<{ hash: string }>;
+  approveAllowance?: (
+    params: ApproveAllowanceParams
+  ) => Promise<{ hash: string; periodsApproved: number }>;
+  subscribe?: (params: SubscribeParams) => Promise<{ hash: string; subscriptionId?: number }>;
+  cancelSubscription?: (
+    params: CancelSubscriptionParams
+  ) => Promise<{ hash: string }>;
+}
+
+declare global {
+  interface Window {
+    __SUPPORTME_MOCK_CONTRACT__?: MockContract;
+  }
+}
+
+export interface SendDonationParams {
+  donorAddress: string;
+  creatorAddress: string;
+  /** Amount in whole units of the asset. */
+  amount: string | number;
+  /** 'XLM' (default) or 'USDC'. */
+  assetCode?: string;
+  memo: string;
+  onStatus?: OnStatus;
+}
+
 /**
  * Calls the deployed `donate` Soroban contract, which both transfers the
  * donated XLM from donor to creator and records the donation on-chain.
- *
- * @param {object} params
- * @param {string} params.donorAddress
- * @param {string} params.creatorAddress
- * @param {string|number} params.amount amount in whole units of the asset
- * @param {string} [params.assetCode] 'XLM' (default) or 'USDC'
- * @param {string} params.memo
- * @param {(status: string) => void} [params.onStatus] called with
- *   'building' | 'simulating' | 'awaiting-signature' | 'submitting' | 'pending' | 'success'
- * @returns {Promise<{ hash: string }>}
  */
-export async function sendDonation({ donorAddress, creatorAddress, amount, assetCode = 'XLM', memo, onStatus }) {
+export async function sendDonation({
+  donorAddress,
+  creatorAddress,
+  amount,
+  assetCode = 'XLM',
+  memo,
+  onStatus,
+}: SendDonationParams): Promise<{ hash: string }> {
   if (typeof window !== 'undefined' && window.__SUPPORTME_MOCK_CONTRACT__?.sendDonation) {
-    return window.__SUPPORTME_MOCK_CONTRACT__.sendDonation({ donorAddress, creatorAddress, amount, assetCode, memo, onStatus });
+    return window.__SUPPORTME_MOCK_CONTRACT__.sendDonation({
+      donorAddress,
+      creatorAddress,
+      amount,
+      assetCode,
+      memo,
+      onStatus,
+    });
   }
   const memoValue = memo || '';
   if (new TextEncoder().encode(memoValue).length > MAX_MEMO_LENGTH) {
     throw new DonationError('simulation', `Message must be ${MAX_MEMO_LENGTH} bytes or fewer.`);
   }
-  let tokenId;
+  let tokenId: string;
   try {
     tokenId = sacContractId(assetCode);
   } catch (err) {
-    throw new DonationError('simulation', err.message, err);
+    throw new DonationError('simulation', (err as Error).message, err);
   }
   const amountStroops = toStroops(amount);
 
@@ -235,6 +295,19 @@ export async function sendDonation({ donorAddress, creatorAddress, amount, asset
   return { hash };
 }
 
+export interface ApproveAllowanceParams {
+  supporterAddress: string;
+  /** Amount charged per interval, in whole units. */
+  amount: string | number;
+  /** 'XLM' (default) or 'USDC'. */
+  assetCode?: string;
+  /** Seconds between charges. */
+  intervalSecs: number;
+  /** How many charges' worth of allowance to aim for (default 12, may be reduced to fit the network's max TTL). */
+  periodsToApprove?: number;
+  onStatus?: OnStatus;
+}
+
 /**
  * Grants the donation contract a SAC allowance so `charge_subscription` can
  * later draw `amount` per interval via `transfer_from`, without a fresh
@@ -244,15 +317,6 @@ export async function sendDonation({ donorAddress, creatorAddress, amount, asset
  * (`MAX_TTL_LEDGERS`) — for long intervals (e.g. monthly) that means fewer
  * than `periodsToApprove` periods get pre-approved; once it runs low the
  * supporter can approve again from the Subscriptions page.
- *
- * @param {object} params
- * @param {string} params.supporterAddress
- * @param {string|number} params.amount amount charged per interval, in whole units
- * @param {string} [params.assetCode] 'XLM' (default) or 'USDC'
- * @param {number} params.intervalSecs seconds between charges
- * @param {number} [params.periodsToApprove] how many charges' worth of allowance to aim for (default 12, may be reduced to fit the network's max TTL)
- * @param {(status: string) => void} [params.onStatus]
- * @returns {Promise<{ hash: string, periodsApproved: number }>}
  */
 export async function approveAllowance({
   supporterAddress,
@@ -261,15 +325,22 @@ export async function approveAllowance({
   intervalSecs,
   periodsToApprove = 12,
   onStatus,
-}) {
+}: ApproveAllowanceParams): Promise<{ hash: string; periodsApproved: number }> {
   if (typeof window !== 'undefined' && window.__SUPPORTME_MOCK_CONTRACT__?.approveAllowance) {
-    return window.__SUPPORTME_MOCK_CONTRACT__.approveAllowance({ supporterAddress, amount, assetCode, intervalSecs, periodsToApprove, onStatus });
+    return window.__SUPPORTME_MOCK_CONTRACT__.approveAllowance({
+      supporterAddress,
+      amount,
+      assetCode,
+      intervalSecs,
+      periodsToApprove,
+      onStatus,
+    });
   }
-  let tokenId;
+  let tokenId: string;
   try {
     tokenId = sacContractId(assetCode);
   } catch (err) {
-    throw new DonationError('simulation', err.message, err);
+    throw new DonationError('simulation', (err as Error).message, err);
   }
   if (!CONTRACT_ID) {
     throw new DonationError(
@@ -286,11 +357,13 @@ export async function approveAllowance({
     );
   }
 
-  let latestLedger;
+  let latestLedger: number;
   try {
-    ({ sequence: latestLedger } = await withRetry('getLatestLedger', () => server.getLatestLedger(), {
-      onRetry: reportRetry,
-    }));
+    ({ sequence: latestLedger } = await withRetry(
+      'getLatestLedger',
+      () => server.getLatestLedger(),
+      { onRetry: reportRetry }
+    ));
   } catch (err) {
     throw new DonationError('network', 'Could not read the current ledger from the network.', err);
   }
@@ -320,20 +393,23 @@ export async function approveAllowance({
   return { hash, periodsApproved };
 }
 
+export interface SubscribeParams {
+  supporterAddress: string;
+  creatorAddress: string;
+  /** Amount charged per interval, in whole units. */
+  amount: string | number;
+  /** 'XLM' (default) or 'USDC'. */
+  assetCode?: string;
+  /** Seconds between charges. */
+  intervalSecs: number;
+  onStatus?: OnStatus;
+}
+
 /**
  * Starts a recurring donation by calling the donation contract's
  * `subscribe`. Must be called after `approveAllowance` has granted a
  * sufficient allowance — `subscribe` only records the schedule, it does
  * not move funds.
- *
- * @param {object} params
- * @param {string} params.supporterAddress
- * @param {string} params.creatorAddress
- * @param {string|number} params.amount amount charged per interval, in whole units
- * @param {string} [params.assetCode] 'XLM' (default) or 'USDC'
- * @param {number} params.intervalSecs seconds between charges
- * @param {(status: string) => void} [params.onStatus]
- * @returns {Promise<{ hash: string, subscriptionId: number }>}
  */
 export async function subscribe({
   supporterAddress,
@@ -342,15 +418,23 @@ export async function subscribe({
   assetCode = 'XLM',
   intervalSecs,
   onStatus,
-}) {
+}: SubscribeParams): Promise<{ hash: string; subscriptionId: number | undefined }> {
   if (typeof window !== 'undefined' && window.__SUPPORTME_MOCK_CONTRACT__?.subscribe) {
-    return window.__SUPPORTME_MOCK_CONTRACT__.subscribe({ supporterAddress, creatorAddress, amount, assetCode, intervalSecs, onStatus });
+    const result = await window.__SUPPORTME_MOCK_CONTRACT__.subscribe({
+      supporterAddress,
+      creatorAddress,
+      amount,
+      assetCode,
+      intervalSecs,
+      onStatus,
+    });
+    return { hash: result.hash, subscriptionId: result.subscriptionId };
   }
-  let tokenId;
+  let tokenId: string;
   try {
     tokenId = sacContractId(assetCode);
   } catch (err) {
-    throw new DonationError('simulation', err.message, err);
+    throw new DonationError('simulation', (err as Error).message, err);
   }
   const amountStroops = toStroops(amount);
 
@@ -370,20 +454,28 @@ export async function subscribe({
   return { hash, subscriptionId: returnValue != null ? Number(returnValue) : undefined };
 }
 
+export interface CancelSubscriptionParams {
+  supporterAddress: string;
+  subscriptionId: number;
+  onStatus?: OnStatus;
+}
+
 /**
  * Cancels a recurring donation via the donation contract's
  * `cancel_subscription`, which also zeroes the remaining on-chain
  * allowance in the same transaction.
- *
- * @param {object} params
- * @param {string} params.supporterAddress
- * @param {number} params.subscriptionId
- * @param {(status: string) => void} [params.onStatus]
- * @returns {Promise<{ hash: string }>}
  */
-export async function cancelSubscription({ supporterAddress, subscriptionId, onStatus }) {
+export async function cancelSubscription({
+  supporterAddress,
+  subscriptionId,
+  onStatus,
+}: CancelSubscriptionParams): Promise<{ hash: string }> {
   if (typeof window !== 'undefined' && window.__SUPPORTME_MOCK_CONTRACT__?.cancelSubscription) {
-    return window.__SUPPORTME_MOCK_CONTRACT__.cancelSubscription({ supporterAddress, subscriptionId, onStatus });
+    return window.__SUPPORTME_MOCK_CONTRACT__.cancelSubscription({
+      supporterAddress,
+      subscriptionId,
+      onStatus,
+    });
   }
   const { hash } = await callContract({
     method: 'cancel_subscription',

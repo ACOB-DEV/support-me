@@ -9,12 +9,20 @@ const NETWORK_PASSPHRASE = Networks.TESTNET;
 
 let initialized = false;
 
+export interface WalletConnectionErrorOptions {
+  code?: string | number;
+  raw?: unknown;
+}
+
 // Normalized error thrown by every wallet operation in this module. The kit
 // and individual wallets reject with plain objects (e.g. `{ code, message }`)
 // or loosely-typed messages, so we wrap them in a real Error carrying the
 // original `code` for downstream categorization.
 export class WalletConnectionError extends Error {
-  constructor(message, options = {}) {
+  code?: string | number;
+  details?: unknown;
+
+  constructor(message: string, options: WalletConnectionErrorOptions = {}) {
     super(message);
     this.name = 'WalletConnectionError';
     this.code = options.code;
@@ -22,17 +30,24 @@ export class WalletConnectionError extends Error {
   }
 }
 
-const toWalletError = (err) => {
+/** Shape of the loosely-typed rejections the kit and individual wallets throw. */
+interface RawWalletError {
+  message?: string;
+  code?: string | number;
+  error?: { message?: string; code?: string | number };
+}
+
+const toWalletError = (err: unknown): WalletConnectionError => {
   if (err instanceof WalletConnectionError) return err;
-  const message =
-    err?.message || err?.error?.message || 'Could not connect to your wallet.';
+  const raw = (err ?? {}) as RawWalletError;
+  const message = raw.message || raw.error?.message || 'Could not connect to your wallet.';
   return new WalletConnectionError(message, {
-    code: err?.error?.code ?? err?.code,
+    code: raw.error?.code ?? raw.code,
     raw: err,
   });
 };
 
-const ensureInit = () => {
+const ensureInit = (): void => {
   if (initialized) return;
 
   StellarWalletsKit.init({
@@ -49,9 +64,25 @@ const ensureInit = () => {
   initialized = true;
 };
 
+interface MockWallet {
+  connectWallet?: () => Promise<string | null>;
+  disconnectWallet?: () => Promise<void>;
+  signTransaction?: (
+    xdr: string,
+    address: string
+  ) => Promise<{ signedTxXdr: string; signerAddress?: string }>;
+  signMessage?: (message: string, address: string) => Promise<string>;
+}
+
+declare global {
+  interface Window {
+    __SUPPORTME_MOCK_WALLET__?: MockWallet;
+  }
+}
+
 // Opens the built-in wallet picker modal (Freighter, xBull, Albedo, Rabet, Lobstr)
 // and returns the connected public address.
-const connectWallet = async () => {
+export const connectWallet = async (): Promise<string | null> => {
   if (typeof window !== 'undefined' && window.__SUPPORTME_MOCK_WALLET__?.connectWallet) {
     return window.__SUPPORTME_MOCK_WALLET__.connectWallet();
   }
@@ -60,11 +91,12 @@ const connectWallet = async () => {
     const res = await StellarWalletsKit.authModal();
     return res?.address || null;
   } catch (err) {
+    const message = (err as RawWalletError)?.message?.toLowerCase() ?? '';
     if (
-      err?.message?.toLowerCase().includes('closed') ||
-      err?.message?.toLowerCase().includes('rejected') ||
-      err?.message?.toLowerCase().includes('canceled') ||
-      err?.message?.toLowerCase().includes('cancelled')
+      message.includes('closed') ||
+      message.includes('rejected') ||
+      message.includes('canceled') ||
+      message.includes('cancelled')
     ) {
       return null;
     }
@@ -72,7 +104,7 @@ const connectWallet = async () => {
   }
 };
 
-const disconnectWallet = async () => {
+export const disconnectWallet = async (): Promise<void> => {
   if (typeof window !== 'undefined' && window.__SUPPORTME_MOCK_WALLET__?.disconnectWallet) {
     return window.__SUPPORTME_MOCK_WALLET__.disconnectWallet();
   }
@@ -81,7 +113,10 @@ const disconnectWallet = async () => {
 };
 
 // Signs an XDR transaction using whichever wallet the user picked in the modal.
-const signTransaction = async (xdr, address) => {
+export const signTransaction = async (
+  xdr: string,
+  address: string
+): Promise<{ signedTxXdr: string; signerAddress?: string }> => {
   if (typeof window !== 'undefined' && window.__SUPPORTME_MOCK_WALLET__?.signTransaction) {
     return window.__SUPPORTME_MOCK_WALLET__.signTransaction(xdr, address);
   }
@@ -98,7 +133,7 @@ const signTransaction = async (xdr, address) => {
 
 // Signs an arbitrary text message (used for the wallet sign-in challenge).
 // Returns the base64-encoded signed message.
-const signMessage = async (message, address) => {
+export const signMessage = async (message: string, address: string): Promise<string> => {
   if (typeof window !== 'undefined' && window.__SUPPORTME_MOCK_WALLET__?.signMessage) {
     return window.__SUPPORTME_MOCK_WALLET__.signMessage(message, address);
   }
@@ -113,5 +148,3 @@ const signMessage = async (message, address) => {
     throw toWalletError(err);
   }
 };
-
-export { connectWallet, disconnectWallet, signTransaction, signMessage };

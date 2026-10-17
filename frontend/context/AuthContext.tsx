@@ -67,6 +67,12 @@ export function AuthProvider({ children }: { children: ReactNode }) {
 
   const loginWithWallet = async (): Promise<LoginResult> => {
     const address = await connectWallet();
+    if (!address) {
+      // connectWallet() resolves null when the user closes the wallet picker
+      // without connecting (see lib/wallet.ts) -- categorized as a user
+      // cancellation, not a missing-wallet error.
+      throw new Error('The wallet connection was cancelled.');
+    }
 
     const challengeRes = await fetch(`${API_URL}/api/auth/challenge`, {
       method: 'POST',

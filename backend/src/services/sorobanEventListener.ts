@@ -16,7 +16,12 @@ import {
 } from "./eventBus";
 
 const RPC_URL = process.env.SOROBAN_RPC_URL || "https://soroban-testnet.stellar.org";
-const DONATION_CONTRACT_ID = process.env.NEXT_PUBLIC_DONATION_CONTRACT_ID;
+// DONATION_CONTRACT_ID is the backend-scoped name (#302), with a fallback to
+// the old NEXT_PUBLIC_-prefixed name for backward compat with deployments
+// that still only have that one set. Remove the fallback once deployed
+// backends are confirmed migrated to the new name.
+const DONATION_CONTRACT_ID =
+  process.env.DONATION_CONTRACT_ID?.trim() || process.env.NEXT_PUBLIC_DONATION_CONTRACT_ID;
 const CREATOR_REGISTRY_CONTRACT_ID = process.env.NEXT_PUBLIC_CREATOR_REGISTRY_CONTRACT_ID;
 const POLL_INTERVAL_MS = Number(process.env.SOROBAN_EVENTS_POLL_INTERVAL_MS) || 5000;
 // How far back to look for events the first time the listener starts, so a
@@ -66,7 +71,7 @@ export class SorobanEventListener {
   start(): void {
     if (!DONATION_CONTRACT_ID) {
       console.warn(
-        "SorobanEventListener: NEXT_PUBLIC_DONATION_CONTRACT_ID is not set, skipping event polling."
+        "SorobanEventListener: DONATION_CONTRACT_ID is not set, skipping event polling."
       );
       return;
     }

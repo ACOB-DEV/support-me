@@ -95,7 +95,7 @@ export class SubscriptionExecutor {
     const executorSecretKey = getExecutorSecretKey();
     
     if (!donationContractId || !executorSecretKey) {
-      const msg = "SubscriptionExecutor cannot start: missing NEXT_PUBLIC_DONATION_CONTRACT_ID or EXECUTOR_SECRET_KEY.";
+      const msg = "SubscriptionExecutor cannot start: missing DONATION_CONTRACT_ID or EXECUTOR_SECRET_KEY.";
       log("error", msg);
       throw new Error(msg);
     }
