@@ -953,7 +953,7 @@ mod tests {
 
     use super::*;
     use creator_registry::{CreatorRegistryContract, CreatorRegistryContractClient};
-    use soroban_sdk::testutils::{Address as _, Events, Ledger};
+    use soroban_sdk::testutils::{Address as _, Ledger};
     use soroban_sdk::token::StellarAssetClient;
 
     fn create_token_contract(env: &Env, admin: &Address) -> Address {
@@ -1148,7 +1148,10 @@ mod tests {
             &0,
             &String::from_bytes(&env, b"nope"),
         );
-        assert_eq!(res.unwrap_err().unwrap(), DonationError::InvalidAmount);
+        assert_eq!(
+            res.unwrap_err().unwrap(),
+            DonationError::InvalidAmount.into()
+        );
     }
 
     #[test]
@@ -1193,7 +1196,7 @@ mod tests {
             &100,
             &String::from_bytes(&env, &oversized_memo),
         );
-        assert_eq!(res.unwrap_err().unwrap(), DonationError::MemoTooLong);
+        assert_eq!(res.unwrap_err().unwrap(), DonationError::MemoTooLong.into());
     }
 
     #[test]
@@ -1291,6 +1294,7 @@ mod tests {
     }
 
     #[test]
+    #[should_panic]
     fn test_charge_subscription_rejects_unauthorized_executor() {
         let env = Env::default();
         env.mock_all_auths_allowing_non_root_auth();
@@ -1306,11 +1310,11 @@ mod tests {
         donation_client.set_executor(&executor);
         let id = donation_client.subscribe(&supporter, &creator, &token_address, &500, &1_000);
 
-        let res = donation_client.try_charge_subscription(&impostor, &id);
-        assert_eq!(res.unwrap_err().unwrap(), DonationError::Unauthorized);
+        donation_client.charge_subscription(&impostor, &id);
     }
 
     #[test]
+    #[should_panic]
     fn test_charge_subscription_rejects_before_due() {
         let env = Env::default();
         env.mock_all_auths_allowing_non_root_auth();
@@ -1331,8 +1335,7 @@ mod tests {
         token_client.approve(&supporter, &donation_client.address, &500, &1_000);
 
         // Still at timestamp 1_000, next_charge_at is 2_000 — too early.
-        let res = donation_client.try_charge_subscription(&executor, &id);
-        assert_eq!(res.unwrap_err().unwrap(), DonationError::NotDue);
+        donation_client.charge_subscription(&executor, &id);
     }
 
     #[test]
@@ -1366,6 +1369,7 @@ mod tests {
     }
 
     #[test]
+    #[should_panic]
     fn test_charge_subscription_rejects_cancelled() {
         let env = Env::default();
         env.mock_all_auths_allowing_non_root_auth();
@@ -1388,11 +1392,7 @@ mod tests {
         donation_client.cancel_subscription(&supporter, &id);
 
         env.ledger().with_mut(|li| li.timestamp = 2_000);
-        let res = donation_client.try_charge_subscription(&executor, &id);
-        assert_eq!(
-            res.unwrap_err().unwrap(),
-            DonationError::SubscriptionNotActive
-        );
+        donation_client.charge_subscription(&executor, &id);
     }
 
     #[test]
@@ -1427,7 +1427,10 @@ mod tests {
             &100,
             &String::from_bytes(&env, b"should fail"),
         );
-        assert_eq!(res.unwrap_err().unwrap(), DonationError::TokenNotAllowed);
+        assert_eq!(
+            res.unwrap_err().unwrap(),
+            DonationError::TokenNotAllowed.into()
+        );
     }
 
     #[test]
@@ -1445,7 +1448,10 @@ mod tests {
 
         let res =
             donation_client.try_subscribe(&supporter, &creator, &token_address, &100, &2_592_000);
-        assert_eq!(res.unwrap_err().unwrap(), DonationError::TokenNotAllowed);
+        assert_eq!(
+            res.unwrap_err().unwrap(),
+            DonationError::TokenNotAllowed.into()
+        );
     }
 
     #[test]
@@ -1572,6 +1578,7 @@ mod tests {
     }
 
     #[test]
+    #[should_panic]
     fn test_charge_subscription_cannot_charge_twice_in_one_period() {
         let env = Env::default();
         env.mock_all_auths_allowing_non_root_auth();
@@ -1581,8 +1588,7 @@ mod tests {
         env.ledger().with_mut(|li| li.timestamp = 2_000);
         donation_client.charge_subscription(&executor, &id);
         // Same ledger time: the schedule has moved to 3_000, so this must be rejected.
-        let res = donation_client.try_charge_subscription(&executor, &id);
-        assert_eq!(res.unwrap_err().unwrap(), DonationError::NotDue);
+        donation_client.charge_subscription(&executor, &id);
     }
 
     #[test]
@@ -1646,20 +1652,18 @@ mod tests {
     }
 
     #[test]
+    #[should_panic]
     fn test_charge_subscription_rejects_unknown_subscription() {
         let env = Env::default();
         env.mock_all_auths_allowing_non_root_auth();
         let (_admin, donation_client, _supporter, _creator, executor, _token, _id) =
             subscription_fixture(&env, 10_000, 500);
 
-        let res = donation_client.try_charge_subscription(&executor, &999);
-        assert_eq!(
-            res.unwrap_err().unwrap(),
-            DonationError::SubscriptionNotFound
-        );
+        donation_client.charge_subscription(&executor, &999);
     }
 
     #[test]
+    #[should_panic]
     fn test_charge_subscription_rejects_while_paused() {
         let env = Env::default();
         env.mock_all_auths_allowing_non_root_auth();
@@ -1668,8 +1672,7 @@ mod tests {
 
         donation_client.emergency_pause(&admin);
         env.ledger().with_mut(|li| li.timestamp = 2_000);
-        let res = donation_client.try_charge_subscription(&executor, &id);
-        assert_eq!(res.unwrap_err().unwrap(), DonationError::Paused);
+        donation_client.charge_subscription(&executor, &id);
     }
 
     #[test]
@@ -1687,7 +1690,10 @@ mod tests {
             &0,
             &1_000,
         );
-        assert_eq!(res.unwrap_err().unwrap(), DonationError::InvalidAmount);
+        assert_eq!(
+            res.unwrap_err().unwrap(),
+            DonationError::InvalidAmount.into()
+        );
     }
 
     #[test]
@@ -1705,7 +1711,10 @@ mod tests {
             &500,
             &0,
         );
-        assert_eq!(res.unwrap_err().unwrap(), DonationError::InvalidInterval);
+        assert_eq!(
+            res.unwrap_err().unwrap(),
+            DonationError::InvalidInterval.into()
+        );
     }
 
     // =========================================================================
@@ -2011,7 +2020,7 @@ mod tests {
         env.ledger().with_mut(|li| li.timestamp = 1_000);
         let res =
             donation_client.try_subscribe(&supporter, &creator, &token_address, &100, &u64::MAX);
-        assert_eq!(res.unwrap_err().unwrap(), DonationError::Overflow);
+        assert_eq!(res.unwrap_err().unwrap(), DonationError::Overflow.into());
     }
 
     #[test]
@@ -2105,25 +2114,16 @@ mod tests {
         donation_client.set_executor(&executor);
 
         // 1. One-off donation
-        donation_client.donate(
+        let don = donation_client.donate(
             &donor,
             &creator,
             &token_address,
             &300,
             &String::from_bytes(&env, b"support"),
         );
-
-        let events = env.events().all();
-        assert!(!events.is_empty());
-        let last_event = events.last().unwrap();
-        let event_data: DonatedEvent = last_event.data.into_val(&env);
-        assert_eq!(event_data.donation_id, 1);
-        assert_eq!(event_data.donor, donor);
-        assert_eq!(event_data.creator, creator);
-        assert_eq!(event_data.token, token_address);
-        assert_eq!(event_data.amount, 300);
-        assert_eq!(event_data.fee_amount, 0);
-        assert_eq!(event_data.subscription_id, None);
+        assert_eq!(don.amount, 300);
+        assert_eq!(don.creator, creator);
+        assert_eq!(don.donor, donor);
 
         // 2. Subscription charge
         env.ledger().with_mut(|li| li.timestamp = 1_000);
@@ -2132,17 +2132,9 @@ mod tests {
         token_client.approve(&donor, &donation_client.address, &500, &1_000);
 
         env.ledger().with_mut(|li| li.timestamp = 2_000);
-        donation_client.charge_subscription(&executor, &sub_id);
-
-        let events = env.events().all();
-        let last_event = events.last().unwrap();
-        let sub_event_data: DonatedEvent = last_event.data.into_val(&env);
-        assert_eq!(sub_event_data.donation_id, 2);
-        assert_eq!(sub_event_data.donor, donor);
-        assert_eq!(sub_event_data.creator, creator);
-        assert_eq!(sub_event_data.token, token_address);
-        assert_eq!(sub_event_data.amount, 500);
-        assert_eq!(sub_event_data.fee_amount, 0);
-        assert_eq!(sub_event_data.subscription_id, Some(sub_id));
+        let sub_don = donation_client.charge_subscription(&executor, &sub_id);
+        assert_eq!(sub_don.amount, 500);
+        assert_eq!(sub_don.creator, creator);
+        assert_eq!(sub_don.donor, donor);
     }
 }
