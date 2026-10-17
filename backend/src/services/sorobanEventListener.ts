@@ -1,5 +1,6 @@
 import { xdr, scValToNative } from "@stellar/stellar-sdk";
 import prisma from "../prisma";
+import { networkReset } from "./networkReset";
 import {
   DONATION_EVENT,
   SUBSCRIPTION_CREATED_EVENT,
@@ -87,6 +88,15 @@ export class SorobanEventListener {
       clearInterval(this.timer);
       this.timer = null;
     }
+  }
+
+  /**
+   * Drops the stored event cursor so the next poll re-derives its start ledger
+   * from the current chain head. Used by the post-reset resync (#278): the old
+   * cursor points into a ledger sequence that no longer exists.
+   */
+  resetCursor(): void {
+    this.cursor = null;
   }
 
   /**
@@ -244,8 +254,17 @@ export class SorobanEventListener {
 
   private async poll(): Promise<void> {
     if (this.polling) return;
+    // #278: once a reset is detected the listener is stopped, but a poll in
+    // flight must not replay events from the dead network. Checking here too
+    // keeps the guarantee local to the polling loop.
+    if (networkReset.getState().status === "reset_detected") return;
     this.polling = true;
     try {
+      // Run detection on the poll cadence as well: the executor only ticks
+      // once a minute, so this is what makes a reset visible "within one poll
+      // interval". check() is cheap and short-circuits once detected.
+      if (await networkReset.check()) return;
+
       const contractIds = [DONATION_CONTRACT_ID!];
       if (CREATOR_REGISTRY_CONTRACT_ID) {
         contractIds.push(CREATOR_REGISTRY_CONTRACT_ID);
