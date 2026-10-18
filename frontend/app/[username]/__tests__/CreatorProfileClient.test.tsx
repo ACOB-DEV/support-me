@@ -60,6 +60,10 @@ vi.mock('@hugeicons/react', () => ({
   HugeiconsIcon: () => null,
 }));
 
+const { mockLoadAccount } = vi.hoisted(() => ({
+  mockLoadAccount: vi.fn().mockResolvedValue({ balances: [] }),
+}));
+
 // lib/assets.js's ASSETS registry is gated on NEXT_PUBLIC_USDC_ISSUER /
 // NEXT_PUBLIC_USDT_ISSUER at module-load time (see lib/__tests__/assets.test.ts
 // for that logic in isolation). Here we only care about how
@@ -71,7 +75,10 @@ vi.mock('@/lib/assets', () => ({
   getAsset: (code: string) => ({
     code,
     label: code,
-    balanceMatcher: () => false,
+    balanceMatcher:
+      code === 'XLM'
+        ? (b: { asset_type?: string }) => b.asset_type === 'native'
+        : (b: { asset_code?: string }) => b.asset_code === code,
   }),
 }));
 
@@ -83,8 +90,8 @@ vi.mock('@stellar/stellar-sdk', async () => {
     ...actual,
     Horizon: {
       Server: class {
-        async loadAccount() {
-          return { balances: [] };
+        loadAccount(...args: unknown[]) {
+          return mockLoadAccount(...args);
         }
       },
     },
@@ -189,11 +196,16 @@ function mockFetchSequence(handlers: Record<string, unknown>) {
 
 describe('CreatorProfileClient', () => {
   beforeEach(() => {
+    mockLoadAccount.mockResolvedValue({ balances: [] });
     mockUseAuth.mockReturnValue({
       user: null,
       token: null,
       loading: false,
       loginWithWallet: vi.fn(),
+      getTwitterRedirectUrl: vi.fn(),
+      completeTwitterLogin: vi.fn(),
+      requestMagicLink: vi.fn(),
+      verifyMagicLink: vi.fn(),
       logout: vi.fn(),
     });
     vi.stubGlobal('EventSource', FakeEventSource as unknown as typeof EventSource);
@@ -322,6 +334,70 @@ describe('CreatorProfileClient', () => {
 
     await waitFor(() => expect(screen.getByRole('button', { name: 'XLM' })).toBeInTheDocument());
     expect(screen.queryByRole('button', { name: 'USDT' })).not.toBeInTheDocument();
+  });
+
+  // Issue #155: Donate page shows XLM balance value under USDC label after switching asset
+  it('updates displayed balance to actual balance of newly selected asset when switching asset toggle (#155)', async () => {
+    mockFetchSequence({
+      '/api/creators/alice': baseCreator,
+      '/api/goals/alice': { items: [] },
+    });
+    mockConnectWallet.mockResolvedValue('GDONORXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXX');
+    mockLoadAccount.mockResolvedValue({
+      balances: [
+        { asset_type: 'native', balance: '100.5000' },
+        { asset_type: 'credit_alphanum4', asset_code: 'USDC', balance: '25.0000' },
+      ],
+    });
+
+    await renderProfile('alice');
+    await waitFor(() => expect(screen.getByText('Alice')).toBeInTheDocument());
+
+    await userEvent.click(screen.getByRole('button', { name: /connect wallet/i }));
+
+    // Initially displays the connected wallet's XLM balance
+    await waitFor(() => expect(screen.getByText('100.5000 XLM')).toBeInTheDocument());
+
+    // Switch to USDC
+    await userEvent.click(screen.getByRole('button', { name: 'USDC' }));
+
+    // Displayed balance updates to the actual USDC balance, not the previous XLM balance relabeled
+    await waitFor(() => expect(screen.getByText('25.0000 USDC')).toBeInTheDocument());
+    expect(screen.queryByText('100.5000 USDC')).not.toBeInTheDocument();
+
+    // Switch back to XLM
+    await userEvent.click(screen.getByRole('button', { name: 'XLM' }));
+
+    // Displayed balance updates back to XLM balance
+    await waitFor(() => expect(screen.getByText('100.5000 XLM')).toBeInTheDocument());
+    expect(screen.queryByText('25.0000 XLM')).not.toBeInTheDocument();
+  });
+
+  it('displays zero balance when switching to an asset without a balance or trustline instead of showing XLM balance (#155)', async () => {
+    mockFetchSequence({
+      '/api/creators/alice': baseCreator,
+      '/api/goals/alice': { items: [] },
+    });
+    mockConnectWallet.mockResolvedValue('GDONORXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXX');
+    mockLoadAccount.mockResolvedValue({
+      balances: [
+        { asset_type: 'native', balance: '9970.9243' },
+      ],
+    });
+
+    await renderProfile('alice');
+    await waitFor(() => expect(screen.getByText('Alice')).toBeInTheDocument());
+
+    await userEvent.click(screen.getByRole('button', { name: /connect wallet/i }));
+
+    await waitFor(() => expect(screen.getByText('9970.9243 XLM')).toBeInTheDocument());
+
+    // Switch to USDC when wallet has no USDC balance
+    await userEvent.click(screen.getByRole('button', { name: 'USDC' }));
+
+    // Displays 0.0000 USDC instead of the XLM balance value
+    await waitFor(() => expect(screen.getByText('0.0000 USDC')).toBeInTheDocument());
+    expect(screen.queryByText('9970.9243 USDC')).not.toBeInTheDocument();
   });
 
   // Issue #120: quick-select preset amount buttons on the donate page.

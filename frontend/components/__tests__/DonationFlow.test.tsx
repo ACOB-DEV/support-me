@@ -86,6 +86,10 @@ describe('Mobile Donation & Subscription Flow', () => {
       token: 'jwt-token',
       loading: false,
       loginWithWallet: vi.fn(),
+      getTwitterRedirectUrl: vi.fn(),
+      completeTwitterLogin: vi.fn(),
+      requestMagicLink: vi.fn(),
+      verifyMagicLink: vi.fn(),
       logout: vi.fn(),
     });
   });
