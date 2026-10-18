@@ -20,8 +20,19 @@
 //! High-risk administrative operations (setting executor, rotating admins,
 //! adjusting threshold, pausing operations) require multi-signature proposal,
 //! approval threshold, and timelock delay before execution.
+//!
+//! Initialization happens atomically at deploy time through `__constructor`;
+//! there is no separate public initializer that could be front-run.
+//!
+//! Unlike the donation log, instance storage (admins, registry, executor,
+//! pause flag, token allowlist) *is* kept alive: every state-changing entry
+//! point extends the instance TTL, and `bump()` lets anyone extend it during
+//! idle periods. See the `common` crate docs for the TTL constants.
 
-use common::{AdminAction, AdminProposal, CreatorProfile, DonationRecord, Subscription};
+use common::{
+    extend_instance_ttl, validate_admin_set, AdminAction, AdminProposal, CreatorProfile,
+    DonationRecord, Subscription,
+};
 use soroban_sdk::{
     contract, contracterror, contractevent, contractimpl, symbol_short, token, Address, Env,
     IntoVal, String, Symbol, Val, Vec,
@@ -158,46 +169,18 @@ pub struct DonationContract;
 
 #[contractimpl]
 impl DonationContract {
-    /// One-time single-admin setup: backwards compatible wrapper initializing 1-of-1 admin setup.
-    pub fn initialize(env: Env, admin: Address, registry: Address) {
-        admin.require_auth();
-        assert!(
-            !env.storage().instance().has(&ADMIN_KEY) && !env.storage().instance().has(&ADMINS_KEY),
-            "donation contract already initialized"
-        );
-
-        let mut admins = Vec::new(&env);
-        admins.push_back(admin.clone());
-
-        env.storage().instance().set(&ADMIN_KEY, &admin);
-        env.storage().instance().set(&ADMINS_KEY, &admins);
-        env.storage().instance().set(&THRESHOLD_KEY, &1u32);
-        env.storage().instance().set(&TIMELOCK_DELAY_KEY, &0u64);
-        env.storage().instance().set(&PAUSED_KEY, &false);
-        env.storage().instance().set(&REGISTRY_KEY, &registry);
-    }
-
-    /// One-time multi-sig setup: configures admin list, threshold, and timelock delay.
-    pub fn initialize_multisig(
+    /// Runs atomically as part of deployment, so no one can race the deployer
+    /// to claim the admin set. `admins[0]` is the primary admin used by the
+    /// single-admin config shortcuts (`set_executor`, token allowlist, donation
+    /// limits). A 1-of-1 deployment passes a single admin and threshold 1.
+    pub fn __constructor(
         env: Env,
         admins: Vec<Address>,
         threshold: u32,
         timelock_delay: u64,
         registry: Address,
     ) {
-        assert!(
-            !env.storage().instance().has(&ADMIN_KEY) && !env.storage().instance().has(&ADMINS_KEY),
-            "donation contract already initialized"
-        );
-        assert!(!admins.is_empty(), "admin list cannot be empty");
-        assert!(
-            threshold > 0 && threshold <= admins.len(),
-            "invalid signature threshold"
-        );
-
-        for i in 0..admins.len() {
-            admins.get(i).unwrap().require_auth();
-        }
+        validate_admin_set(&admins, threshold);
 
         let primary_admin = admins.get(0).unwrap();
         env.storage().instance().set(&ADMIN_KEY, &primary_admin);
@@ -208,6 +191,14 @@ impl DonationContract {
             .set(&TIMELOCK_DELAY_KEY, &timelock_delay);
         env.storage().instance().set(&PAUSED_KEY, &false);
         env.storage().instance().set(&REGISTRY_KEY, &registry);
+        extend_instance_ttl(&env);
+    }
+
+    /// Permissionless keep-alive: extends the instance TTL so the contract is
+    /// not archived during long periods without other state-changing calls.
+    /// Intended to be called on a schedule by the backend executor.
+    pub fn bump(env: Env) {
+        extend_instance_ttl(&env);
     }
 
     /// Returns whether a given address is an authorized contract admin.
@@ -230,15 +221,14 @@ impl DonationContract {
         admin.require_auth();
         assert!(Self::is_admin(env.clone(), admin), "caller is not an admin");
         env.storage().instance().set(&PAUSED_KEY, &true);
+        extend_instance_ttl(&env);
     }
 
     /// Proposes a multi-signature administrative action.
     pub fn propose_admin_action(env: Env, proposer: Address, action: AdminAction) -> u64 {
         proposer.require_auth();
-        assert!(
-            Self::is_admin(env.clone(), proposer.clone()),
-            "proposer is not an admin"
-        );
+        assert!(Self::is_admin(env.clone(), proposer.clone()), "proposer is not an admin");
+        extend_instance_ttl(&env);
 
         let prop_id: u64 = env
             .storage()
@@ -305,6 +295,7 @@ impl DonationContract {
             .get(&(APPROVAL_KEY, proposal_id, admin.clone()))
             .unwrap_or(false);
         assert!(!has_approved, "admin has already approved this proposal");
+        extend_instance_ttl(&env);
 
         env.storage()
             .persistent()
@@ -351,10 +342,8 @@ impl DonationContract {
         );
 
         let now = env.ledger().timestamp();
-        assert!(
-            now >= proposal.eta,
-            "proposal timelock delay has not elapsed"
-        );
+        assert!(now >= proposal.eta, "proposal timelock delay has not elapsed");
+        extend_instance_ttl(&env);
 
         match proposal.action.clone() {
             AdminAction::SetExecutor(target) => {
@@ -426,6 +415,7 @@ impl DonationContract {
                 .expect("donation contract not initialized");
             admin.require_auth();
             env.storage().instance().set(&EXECUTOR_KEY, &executor);
+            extend_instance_ttl(&env);
         } else {
             panic!("multi-sig required: use propose_admin_action to set executor");
         }
@@ -433,10 +423,8 @@ impl DonationContract {
 
     /// Cross-contract call: delegates creator registration to the CreatorRegistry contract.
     pub fn register_creator(env: Env, creator: Address, username: String) -> CreatorProfile {
-        assert!(
-            !Self::is_paused(env.clone()),
-            "contract is currently paused"
-        );
+        assert!(!Self::is_paused(env.clone()), "contract is currently paused");
+        extend_instance_ttl(&env);
         let registry = Self::registry_address(&env);
         let args: Vec<Val> = (creator, username).into_val(&env);
         env.invoke_contract(&registry, &Symbol::new(&env, "register_creator"), args)
@@ -455,11 +443,10 @@ impl DonationContract {
             .storage()
             .instance()
             .get(&ADMIN_KEY)
-            .expect("donation contract not initialized: call initialize() first");
+            .expect("donation contract not initialized");
         admin.require_auth();
-        env.storage()
-            .instance()
-            .set(&(ALLOWED_TOKEN_KEY, token), &true);
+        env.storage().instance().set(&(ALLOWED_TOKEN_KEY, token), &true);
+        extend_instance_ttl(&env);
     }
 
     /// Admin-gated: removes a token address from the allowlist.
@@ -468,9 +455,10 @@ impl DonationContract {
             .storage()
             .instance()
             .get(&ADMIN_KEY)
-            .expect("donation contract not initialized: call initialize() first");
+            .expect("donation contract not initialized");
         admin.require_auth();
         env.storage().instance().remove(&(ALLOWED_TOKEN_KEY, token));
+        extend_instance_ttl(&env);
     }
 
     /// Checks if a token is currently in the allowlist.
@@ -485,9 +473,10 @@ impl DonationContract {
             .storage()
             .instance()
             .get(&ADMIN_KEY)
-            .expect("donation contract not initialized: call initialize() first");
+            .expect("donation contract not initialized");
         admin.require_auth();
         env.storage().instance().set(&MIN_DONATION_KEY, &min_amount);
+        extend_instance_ttl(&env);
     }
 
     /// Returns the currently configured minimum donation amount (0 if unconstrained).
@@ -502,9 +491,10 @@ impl DonationContract {
             .storage()
             .instance()
             .get(&ADMIN_KEY)
-            .expect("donation contract not initialized: call initialize() first");
+            .expect("donation contract not initialized");
         admin.require_auth();
         env.storage().instance().set(&MAX_DONATION_KEY, &max_amount);
+        extend_instance_ttl(&env);
     }
 
     /// Returns the currently configured maximum donation amount (0 if unconstrained).
@@ -553,6 +543,7 @@ impl DonationContract {
             Self::is_token_allowed(env.clone(), token.clone()),
             "Token is not in the allowlist"
         );
+        extend_instance_ttl(&env);
 
         let token_client = token::Client::new(&env, &token);
         token_client.transfer(&donor, &creator, &amount);
@@ -622,6 +613,7 @@ impl DonationContract {
             Self::is_token_allowed(env.clone(), token.clone()),
             "Token is not in the allowlist"
         );
+        extend_instance_ttl(&env);
 
         let id: u64 = env.storage().persistent().get(&SUB_COUNTER).unwrap_or(0);
         let now = env.ledger().timestamp();
@@ -684,6 +676,7 @@ impl DonationContract {
             executor, authorized_executor,
             "caller is not the authorized executor"
         );
+        extend_instance_ttl(&env);
 
         let mut subscription: Subscription = env
             .storage()
@@ -807,6 +800,7 @@ impl DonationContract {
             subscription.supporter, supporter,
             "not the subscription owner"
         );
+        extend_instance_ttl(&env);
 
         subscription.active = false;
         env.storage()
@@ -834,6 +828,7 @@ impl DonationContract {
     /// Cross-contract call: updates a creator's funding goal in the CreatorRegistry.
     pub fn set_goal(env: Env, creator: Address, goal_amount: i128) {
         creator.require_auth();
+        extend_instance_ttl(&env);
         let registry = Self::registry_address(&env);
         let args: Vec<Val> = (creator.clone(), goal_amount).into_val(&env);
         let (): () = env.invoke_contract(&registry, &Symbol::new(&env, "set_goal"), args);
@@ -891,7 +886,7 @@ impl DonationContract {
         env.storage()
             .instance()
             .get(&REGISTRY_KEY)
-            .expect("donation contract not initialized: call initialize() first")
+            .expect("donation contract not initialized")
     }
 
     fn contains_address(vec: &Vec<Address>, target: &Address) -> bool {
@@ -918,23 +913,35 @@ mod tests {
             .address()
     }
 
-    fn setup(
+    /// Deploys both contracts with constructor args. Each needs the other's
+    /// address, so the registry address is fixed up front and the registry is
+    /// registered at it afterwards, mirroring the salted deploy in the docs.
+    fn deploy_pair(
         env: &Env,
-    ) -> (
-        Address,
-        DonationContractClient<'_>,
-        CreatorRegistryContractClient<'_>,
-    ) {
+        admins: Vec<Address>,
+        threshold: u32,
+        timelock_delay: u64,
+    ) -> (DonationContractClient<'_>, CreatorRegistryContractClient<'_>) {
+        let registry_id = Address::generate(env);
+        let donation_id = env.register(
+            DonationContract,
+            (admins.clone(), threshold, timelock_delay, registry_id.clone()),
+        );
+        env.register_at(
+            &registry_id,
+            CreatorRegistryContract,
+            (admins, threshold, timelock_delay, donation_id.clone()),
+        );
+        (
+            DonationContractClient::new(env, &donation_id),
+            CreatorRegistryContractClient::new(env, &registry_id),
+        )
+    }
+
+    fn setup(env: &Env) -> (Address, DonationContractClient<'_>, CreatorRegistryContractClient<'_>) {
         let admin = Address::generate(env);
-        let registry_id = env.register(CreatorRegistryContract, ());
-        let donation_id = env.register(DonationContract, ());
-
-        let registry_client = CreatorRegistryContractClient::new(env, &registry_id);
-        let donation_client = DonationContractClient::new(env, &donation_id);
-
-        registry_client.initialize(&admin, &donation_id);
-        donation_client.initialize(&admin, &registry_id);
-
+        let (donation_client, registry_client) =
+            deploy_pair(env, Vec::from_array(env, [admin.clone()]), 1, 0);
         (admin, donation_client, registry_client)
     }
 
@@ -969,13 +976,8 @@ mod tests {
         admins.push_back(admin2.clone());
         admins.push_back(admin3.clone());
 
-        let registry_id = env.register(CreatorRegistryContract, ());
-        let donation_id = env.register(DonationContract, ());
-
-        let donation_client = DonationContractClient::new(&env, &donation_id);
-
         // 2-of-3 threshold with 100 seconds timelock delay
-        donation_client.initialize_multisig(&admins, &2, &100, &registry_id);
+        let (donation_client, _registry_client) = deploy_pair(&env, admins, 2, 100);
 
         let prop_id = donation_client
             .propose_admin_action(&admin1, &AdminAction::SetExecutor(executor.clone()));
@@ -2036,5 +2038,122 @@ mod tests {
                 .next_charge_at,
             2_000
         );
+    }
+
+    #[test]
+    fn test_no_init_entry_point_callable_after_deploy() {
+        let env = Env::default();
+        env.mock_all_auths_allowing_non_root_auth();
+        let (admin, donation_client, _registry_client) = setup(&env);
+
+        let attacker = Address::generate(&env);
+        let attacker_registry = Address::generate(&env);
+        let attacker_admins = Vec::from_array(&env, [attacker.clone()]);
+
+        let attempts: [(&str, Vec<Val>); 3] = [
+            ("initialize", (attacker.clone(), attacker_registry.clone()).into_val(&env)),
+            (
+                "initialize_multisig",
+                (attacker_admins.clone(), 1u32, 0u64, attacker_registry.clone()).into_val(&env),
+            ),
+            (
+                "__constructor",
+                (attacker_admins, 1u32, 0u64, attacker_registry.clone()).into_val(&env),
+            ),
+        ];
+        for (name, args) in attempts {
+            let res = env.try_invoke_contract::<Val, soroban_sdk::Error>(
+                &donation_client.address,
+                &Symbol::new(&env, name),
+                args,
+            );
+            assert!(res.is_err(), "{name} must not be callable after deploy");
+        }
+
+        assert!(donation_client.is_admin(&admin));
+        assert!(!donation_client.is_admin(&attacker));
+    }
+
+    #[test]
+    #[should_panic(expected = "admin list cannot be empty")]
+    fn test_constructor_rejects_empty_admin_list() {
+        let env = Env::default();
+        env.register(
+            DonationContract,
+            (Vec::<Address>::new(&env), 1u32, 0u64, Address::generate(&env)),
+        );
+    }
+
+    #[test]
+    fn test_register_creator_via_donation_rejects_invalid_username() {
+        let env = Env::default();
+        env.mock_all_auths_allowing_non_root_auth();
+        let (_admin, donation_client, registry_client) = setup(&env);
+
+        let creator = Address::generate(&env);
+        assert!(donation_client
+            .try_register_creator(&creator, &String::from_str(&env, ""))
+            .is_err());
+        assert!(donation_client
+            .try_register_creator(&creator, &String::from_str(&env, "Bad Name"))
+            .is_err());
+        assert!(registry_client.get_creator(&creator).is_none());
+    }
+
+    fn instance_ttl(env: &Env, contract: &Address) -> u32 {
+        use soroban_sdk::testutils::storage::Instance as _;
+        env.as_contract(contract, || env.storage().instance().get_ttl())
+    }
+
+    #[test]
+    fn test_instance_ttl_survives_past_default_ttl_with_usage() {
+        use common::{INSTANCE_BUMP_AMOUNT, INSTANCE_LIFETIME_THRESHOLD};
+
+        let env = Env::default();
+        env.mock_all_auths_allowing_non_root_auth();
+        let (admin, donation_client, registry_client) = setup(&env);
+
+        let donor = Address::generate(&env);
+        let creator = Address::generate(&env);
+        let token_address = create_token_contract(&env, &admin);
+        donation_client.add_allowed_token(&token_address);
+        StellarAssetClient::new(&env, &token_address).mint(&donor, &1_000_000);
+
+        assert!(instance_ttl(&env, &donation_client.address) >= INSTANCE_LIFETIME_THRESHOLD);
+
+        // Advance well beyond the default instance TTL (and two full bump
+        // periods) in steps, donating in between. The test host does not
+        // reject reads of archived entries, so liveness is asserted via the
+        // remaining TTL after each step. A donation touches both contracts.
+        let default_ttl = env.ledger().get().min_persistent_entry_ttl;
+        let step = default_ttl.max(INSTANCE_BUMP_AMOUNT - INSTANCE_LIFETIME_THRESHOLD + 1);
+        let steps = 2 * INSTANCE_BUMP_AMOUNT / step + 1;
+        for _ in 0..steps {
+            env.ledger().with_mut(|li| li.sequence_number += step);
+            donation_client.donate(&donor, &creator, &token_address, &1, &String::from_str(&env, ""));
+            assert!(instance_ttl(&env, &donation_client.address) >= INSTANCE_LIFETIME_THRESHOLD);
+            assert!(instance_ttl(&env, &registry_client.address) >= INSTANCE_LIFETIME_THRESHOLD);
+        }
+
+        // Config held in instance storage is still intact.
+        assert!(donation_client.is_admin(&admin));
+        assert!(donation_client.is_token_allowed(&token_address));
+        assert_eq!(donation_client.get_total_donations_count(), steps);
+    }
+
+    #[test]
+    fn test_bump_extends_instance_ttl() {
+        use common::{DAY_IN_LEDGERS, INSTANCE_BUMP_AMOUNT, INSTANCE_LIFETIME_THRESHOLD};
+
+        let env = Env::default();
+        let (_admin, donation_client, _registry_client) = setup(&env);
+
+        env.ledger()
+            .with_mut(|li| li.sequence_number += INSTANCE_BUMP_AMOUNT - 2 * DAY_IN_LEDGERS);
+        assert!(instance_ttl(&env, &donation_client.address) < INSTANCE_LIFETIME_THRESHOLD);
+
+        // No auth required.
+        donation_client.bump();
+        assert_eq!(instance_ttl(&env, &donation_client.address), INSTANCE_BUMP_AMOUNT);
     }
 }
