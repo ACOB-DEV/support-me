@@ -8,52 +8,17 @@ import { API_URL } from '@/lib/api';
 
 type EarningsByCurrency = Record<string, number>;
 
-interface ActivityUser {
-  id: number;
-  walletAddress: string;
-  joinedAt: string;
-  username: string | null;
-  displayName: string | null;
-  earningsByCurrency: EarningsByCurrency;
-}
-
-interface PaginationInfo {
-  page: number;
-  limit: number;
-  total: number;
-  totalPages: number;
-}
-
 interface OverviewData {
   totalSignups: number;
   totalCreators: number;
   earningsByCurrency: EarningsByCurrency;
-  users: ActivityUser[];
-  pagination: PaginationInfo;
 }
-
-function EarningsCell({ earnings }: { earnings: EarningsByCurrency }) {
-  const entries = Object.entries(earnings).filter(([, v]) => v > 0);
-  if (entries.length === 0) return <span className="text-muted">—</span>;
-  return (
-    <span className="tabular-nums">
-      {entries.map(([currency, amount]) => (
-        <span key={currency} className="mr-3 whitespace-nowrap">
-          {amount.toFixed(2)} {currency}
-        </span>
-      ))}
-    </span>
-  );
-}
-
-const shortWallet = (w: string) => `${w.slice(0, 6)}…${w.slice(-4)}`;
 
 export default function ActivityPage() {
   const [data, setData] = useState<OverviewData | null>(null);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState('');
   const [earningsCurrency, setEarningsCurrency] = useState<string | null>(null);
-  const [currentPage, setCurrentPage] = useState(1);
 
   const currencies = data
     ? Object.keys(data.earningsByCurrency).sort((a, b) => {
@@ -74,7 +39,7 @@ export default function ActivityPage() {
     const fetchOverview = async () => {
       setLoading(true);
       try {
-        const res = await fetch(`${API_URL}/api/activity/overview?page=${currentPage}`);
+        const res = await fetch(`${API_URL}/api/activity/overview`);
         if (!res.ok) {
           const body = await res.json().catch(() => ({}));
           throw new Error(body.error || 'Failed to load activity overview');
@@ -87,7 +52,7 @@ export default function ActivityPage() {
       }
     };
     fetchOverview();
-  }, [currentPage]);
+  }, []);
 
   if (loading) {
     return <ActivitySkeleton />;
@@ -96,13 +61,18 @@ export default function ActivityPage() {
   // Nothing has happened on the platform yet — no signups, no creators, no
   // earnings. Zeroed stat cards and an empty table read as broken here, so
   // show an encouraging empty state with a CTA to become the first creator.
-  const isEmpty = !!data && data.totalSignups === 0 && data.users.length === 0;
+  const isEmpty = !!data && data.totalSignups === 0 && data.totalCreators === 0;
 
   return (
     <div className="min-h-screen bg-background">
       <AppNav />
       <div className="max-w-6xl mx-auto px-4 sm:px-6 lg:px-8 py-10">
-        <h1 className="text-4xl font-extrabold text-ink tracking-tight mb-8">Activity</h1>
+        <h1 className="text-4xl font-extrabold text-ink tracking-tight mb-3">Community Activity</h1>
+        <p className="text-muted font-medium max-w-2xl mb-8">
+          Platform-wide totals for everyone curious how SupportMe is growing — supporters, creators
+          and anyone evaluating the platform. These numbers are aggregated across all accounts:
+          individual names, wallet addresses and earnings are never listed here.
+        </p>
 
         {error && (
           <div className="card-brutal bg-brand-pink p-4 mb-6 text-ink font-bold">{error}</div>
@@ -126,12 +96,14 @@ export default function ActivityPage() {
             <div className="grid md:grid-cols-3 gap-6 mb-8">
               <div className="card-brutal bg-brand-cyan p-6">
                 <p className="text-ink text-sm font-bold uppercase tracking-wide">Sign-ups</p>
+                <p className="text-ink/70 text-xs font-medium mt-1">Accounts created on SupportMe</p>
                 <p className="text-4xl font-extrabold text-ink mt-2 tabular-nums">
                   {data?.totalSignups ?? 0}
                 </p>
               </div>
               <div className="card-brutal bg-brand-lime p-6">
                 <p className="text-ink text-sm font-bold uppercase tracking-wide">Creators</p>
+                <p className="text-ink/70 text-xs font-medium mt-1">Accounts with a creator page</p>
                 <p className="text-4xl font-extrabold text-ink mt-2 tabular-nums">
                   {data?.totalCreators ?? 0}
                 </p>
@@ -158,6 +130,9 @@ export default function ActivityPage() {
                     </div>
                   )}
                 </div>
+                <p className="text-ink/70 text-xs font-medium mt-1">
+                  Verified donations received by all creators combined, per currency
+                </p>
                 {currencies.length > 0 && earningsCurrency ? (
                   <p className="text-4xl font-extrabold text-ink mt-2 tabular-nums">
                     {(data?.earningsByCurrency[earningsCurrency] ?? 0).toFixed(2)}{' '}
@@ -167,84 +142,6 @@ export default function ActivityPage() {
                   <p className="text-4xl font-extrabold text-ink/40 mt-2 tabular-nums">—</p>
                 )}
               </div>
-            </div>
-
-            {/* Users table */}
-            <div className="card-brutal p-6">
-              <h2 className="text-lg font-extrabold text-ink mb-4">
-                Users {data ? `(${data.pagination.total})` : ''}
-              </h2>
-              {!data || data.users.length === 0 ? (
-                <p className="text-muted font-medium">No users yet.</p>
-              ) : (
-                <>
-                  <div className="overflow-x-auto">
-                    <table className="w-full text-left">
-                      <thead>
-                        <tr className="text-xs font-bold uppercase tracking-wide text-muted border-b-2 border-ink">
-                          <th className="py-2 pr-4">#</th>
-                          <th className="py-2 pr-4">Name</th>
-                          <th className="py-2 pr-4">Wallet</th>
-                          <th className="py-2 pr-4">Joined</th>
-                          <th className="py-2">Earnings</th>
-                        </tr>
-                      </thead>
-                      <tbody className="divide-y divide-ink/10">
-                        {data.users.map((u, i) => (
-                          <tr key={u.id} className="text-sm">
-                            <td className="py-2.5 pr-4 text-muted tabular-nums">{(currentPage - 1) * 10 + i + 1}</td>
-                            <td className="py-2.5 pr-4 font-bold text-ink">
-                              {u.displayName || u.username || (
-                                <span className="text-muted font-medium">No profile</span>
-                              )}
-                            </td>
-                            <td className="py-2.5 pr-4 font-mono text-muted whitespace-nowrap" title={u.walletAddress}>
-                              {shortWallet(u.walletAddress)}
-                            </td>
-                            <td className="py-2.5 pr-4 text-muted whitespace-nowrap">
-                              {new Date(u.joinedAt).toLocaleDateString(undefined, {
-                                year: 'numeric',
-                                month: 'short',
-                                day: 'numeric',
-                              })}
-                            </td>
-                            <td className="py-2.5 font-bold text-ink">
-                              <EarningsCell earnings={u.earningsByCurrency} />
-                            </td>
-                          </tr>
-                        ))}
-                      </tbody>
-                    </table>
-                  </div>
-
-                  {/* Pagination */}
-                  {data.pagination.totalPages > 1 && (
-                    <div className="flex items-center justify-between mt-6 pt-4 border-t-2 border-ink/10">
-                      <p className="text-sm text-muted font-medium">
-                        Page {data.pagination.page} of {data.pagination.totalPages}
-                      </p>
-                      <div className="flex gap-2">
-                        <button
-                          type="button"
-                          onClick={() => setCurrentPage((p) => Math.max(1, p - 1))}
-                          disabled={currentPage === 1}
-                          className="btn-brutal px-3 py-1.5 text-sm font-bold min-h-[44px] flex items-center justify-center disabled:opacity-40 disabled:cursor-not-allowed"
-                        >
-                          Previous
-                        </button>
-                        <button
-                          type="button"
-                          onClick={() => setCurrentPage((p) => Math.min(data.pagination.totalPages, p + 1))}
-                          disabled={currentPage === data.pagination.totalPages}
-                          className="btn-brutal px-3 py-1.5 text-sm font-bold min-h-[44px] flex items-center justify-center disabled:opacity-40 disabled:cursor-not-allowed"
-                        >
-                          Next
-                        </button>
-                      </div>
-                    </div>
-                  )}
-                </>
-              )}
             </div>
           </>
         )}

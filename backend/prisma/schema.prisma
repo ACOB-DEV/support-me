@@ -125,6 +125,10 @@ model Creator {
   goals         Goal[]
 
   @@index([walletAddress])
+  // A non-empty walletAddress is unique across creators (#276). That is a
+  // partial unique index ("walletAddress" <> '') created in migration
+  // 20261018000000_creator_wallet_unique, which Prisma's schema language
+  // cannot express, so it is not declared here.
 }
 
 model Donation {

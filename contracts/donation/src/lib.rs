@@ -30,8 +30,8 @@
 //! idle periods. See the `common` crate docs for the TTL constants.
 
 use common::{
-    extend_instance_ttl, validate_admin_set, AdminAction, AdminProposal, CreatorProfile,
-    DonationRecord, Subscription,
+    extend_instance_ttl, extend_persistent_ttl, extend_subscription_ttl, validate_admin_set,
+    AdminAction, AdminProposal, CreatorProfile, DonationRecord, Subscription,
 };
 use soroban_sdk::{
     contract, contracterror, contractevent, contractimpl, symbol_short, token, Address, Env,
@@ -227,7 +227,10 @@ impl DonationContract {
     /// Proposes a multi-signature administrative action.
     pub fn propose_admin_action(env: Env, proposer: Address, action: AdminAction) -> u64 {
         proposer.require_auth();
-        assert!(Self::is_admin(env.clone(), proposer.clone()), "proposer is not an admin");
+        assert!(
+            Self::is_admin(env.clone(), proposer.clone()),
+            "proposer is not an admin"
+        );
         extend_instance_ttl(&env);
 
         let prop_id: u64 = env
@@ -342,7 +345,10 @@ impl DonationContract {
         );
 
         let now = env.ledger().timestamp();
-        assert!(now >= proposal.eta, "proposal timelock delay has not elapsed");
+        assert!(
+            now >= proposal.eta,
+            "proposal timelock delay has not elapsed"
+        );
         extend_instance_ttl(&env);
 
         match proposal.action.clone() {
@@ -423,7 +429,10 @@ impl DonationContract {
 
     /// Cross-contract call: delegates creator registration to the CreatorRegistry contract.
     pub fn register_creator(env: Env, creator: Address, username: String) -> CreatorProfile {
-        assert!(!Self::is_paused(env.clone()), "contract is currently paused");
+        assert!(
+            !Self::is_paused(env.clone()),
+            "contract is currently paused"
+        );
         extend_instance_ttl(&env);
         let registry = Self::registry_address(&env);
         let args: Vec<Val> = (creator, username).into_val(&env);
@@ -445,7 +454,9 @@ impl DonationContract {
             .get(&ADMIN_KEY)
             .expect("donation contract not initialized");
         admin.require_auth();
-        env.storage().instance().set(&(ALLOWED_TOKEN_KEY, token), &true);
+        env.storage()
+            .instance()
+            .set(&(ALLOWED_TOKEN_KEY, token), &true);
         extend_instance_ttl(&env);
     }
 
@@ -638,6 +649,12 @@ impl DonationContract {
             &SUB_COUNTER,
             &id.checked_add(1).expect("subscription counter overflow"),
         );
+        // Subscriptions are live, mutable state with no off-chain fallback:
+        // if one were archived, charge and cancel would both fail. Keep the
+        // entry (and the id counter, whose loss would reuse ids) alive well
+        // past the next charge.
+        extend_subscription_ttl(&env, &(SUBSCRIPTIONS_KEY, id), interval_secs);
+        extend_persistent_ttl(&env, &SUB_COUNTER);
 
         SubscribedEvent {
             supporter,
@@ -727,6 +744,11 @@ impl DonationContract {
         env.storage()
             .persistent()
             .set(&(SUBSCRIPTIONS_KEY, subscription_id), &subscription);
+        extend_subscription_ttl(
+            &env,
+            &(SUBSCRIPTIONS_KEY, subscription_id),
+            subscription.interval_secs,
+        );
 
         // Draw on the allowance: this contract is the `spender`, authorized
         // implicitly since it is the direct invoker (same trick used below
@@ -806,6 +828,11 @@ impl DonationContract {
         env.storage()
             .persistent()
             .set(&(SUBSCRIPTIONS_KEY, subscription_id), &subscription);
+        extend_subscription_ttl(
+            &env,
+            &(SUBSCRIPTIONS_KEY, subscription_id),
+            subscription.interval_secs,
+        );
 
         let token_client = token::Client::new(&env, &subscription.token);
         token_client.approve(&supporter, &env.current_contract_address(), &0, &0);
@@ -816,6 +843,25 @@ impl DonationContract {
             subscription_id,
         }
         .publish(&env);
+    }
+
+    /// Permissionless keep-alive for a subscription entry. Intervals longer
+    /// than the maximum extension (e.g. annual) outlive a single bump, so the
+    /// backend executor should call this between charges. Only extends the TTL
+    /// (and only once it has dropped below the threshold); it changes no
+    /// subscription data and moves no funds.
+    pub fn bump_subscription(env: Env, subscription_id: u64) {
+        extend_instance_ttl(&env);
+        let subscription: Subscription = env
+            .storage()
+            .persistent()
+            .get(&(SUBSCRIPTIONS_KEY, subscription_id))
+            .expect("subscription not found");
+        extend_subscription_ttl(
+            &env,
+            &(SUBSCRIPTIONS_KEY, subscription_id),
+            subscription.interval_secs,
+        );
     }
 
     /// Fetch a subscription by its ID.
@@ -921,11 +967,19 @@ mod tests {
         admins: Vec<Address>,
         threshold: u32,
         timelock_delay: u64,
-    ) -> (DonationContractClient<'_>, CreatorRegistryContractClient<'_>) {
+    ) -> (
+        DonationContractClient<'_>,
+        CreatorRegistryContractClient<'_>,
+    ) {
         let registry_id = Address::generate(env);
         let donation_id = env.register(
             DonationContract,
-            (admins.clone(), threshold, timelock_delay, registry_id.clone()),
+            (
+                admins.clone(),
+                threshold,
+                timelock_delay,
+                registry_id.clone(),
+            ),
         );
         env.register_at(
             &registry_id,
@@ -938,7 +992,13 @@ mod tests {
         )
     }
 
-    fn setup(env: &Env) -> (Address, DonationContractClient<'_>, CreatorRegistryContractClient<'_>) {
+    fn setup(
+        env: &Env,
+    ) -> (
+        Address,
+        DonationContractClient<'_>,
+        CreatorRegistryContractClient<'_>,
+    ) {
         let admin = Address::generate(env);
         let (donation_client, registry_client) =
             deploy_pair(env, Vec::from_array(env, [admin.clone()]), 1, 0);
@@ -2051,10 +2111,19 @@ mod tests {
         let attacker_admins = Vec::from_array(&env, [attacker.clone()]);
 
         let attempts: [(&str, Vec<Val>); 3] = [
-            ("initialize", (attacker.clone(), attacker_registry.clone()).into_val(&env)),
+            (
+                "initialize",
+                (attacker.clone(), attacker_registry.clone()).into_val(&env),
+            ),
             (
                 "initialize_multisig",
-                (attacker_admins.clone(), 1u32, 0u64, attacker_registry.clone()).into_val(&env),
+                (
+                    attacker_admins.clone(),
+                    1u32,
+                    0u64,
+                    attacker_registry.clone(),
+                )
+                    .into_val(&env),
             ),
             (
                 "__constructor",
@@ -2080,7 +2149,12 @@ mod tests {
         let env = Env::default();
         env.register(
             DonationContract,
-            (Vec::<Address>::new(&env), 1u32, 0u64, Address::generate(&env)),
+            (
+                Vec::<Address>::new(&env),
+                1u32,
+                0u64,
+                Address::generate(&env),
+            ),
         );
     }
 
@@ -2130,7 +2204,13 @@ mod tests {
         let steps = 2 * INSTANCE_BUMP_AMOUNT / step + 1;
         for _ in 0..steps {
             env.ledger().with_mut(|li| li.sequence_number += step);
-            donation_client.donate(&donor, &creator, &token_address, &1, &String::from_str(&env, ""));
+            donation_client.donate(
+                &donor,
+                &creator,
+                &token_address,
+                &1,
+                &String::from_str(&env, ""),
+            );
             assert!(instance_ttl(&env, &donation_client.address) >= INSTANCE_LIFETIME_THRESHOLD);
             assert!(instance_ttl(&env, &registry_client.address) >= INSTANCE_LIFETIME_THRESHOLD);
         }
@@ -2154,6 +2234,158 @@ mod tests {
 
         // No auth required.
         donation_client.bump();
-        assert_eq!(instance_ttl(&env, &donation_client.address), INSTANCE_BUMP_AMOUNT);
+        assert_eq!(
+            instance_ttl(&env, &donation_client.address),
+            INSTANCE_BUMP_AMOUNT
+        );
+    }
+
+    // ------------------------------------------------------------------
+    // Subscription entry TTLs (#214)
+    // ------------------------------------------------------------------
+
+    fn subscription_ttl(env: &Env, donation: &Address, id: u64) -> u32 {
+        use soroban_sdk::testutils::storage::Persistent as _;
+        env.as_contract(donation, || {
+            env.storage().persistent().get_ttl(&(SUBSCRIPTIONS_KEY, id))
+        })
+    }
+
+    const MONTH_SECS: u64 = 30 * 86_400;
+
+    #[test]
+    fn test_subscribe_extends_subscription_ttl_past_next_charge() {
+        use common::subscription_bump_amount;
+
+        let env = Env::default();
+        env.mock_all_auths_allowing_non_root_auth();
+        let (admin, donation_client, _registry_client) = setup(&env);
+        let supporter = Address::generate(&env);
+        let creator = Address::generate(&env);
+        let token_address = create_token_contract(&env, &admin);
+        donation_client.add_allowed_token(&token_address);
+
+        let id = donation_client.subscribe(&supporter, &creator, &token_address, &100, &MONTH_SECS);
+
+        let ttl = subscription_ttl(&env, &donation_client.address, id);
+        assert_eq!(ttl, subscription_bump_amount(MONTH_SECS));
+        // Comfortably beyond the interval itself (monthly = 518_400 ledgers).
+        assert!(u64::from(ttl) > MONTH_SECS / 5);
+    }
+
+    #[test]
+    fn test_charge_subscription_renews_ttl_and_survives_long_idle_periods() {
+        use common::{subscription_bump_amount, DAY_IN_LEDGERS};
+
+        let env = Env::default();
+        env.mock_all_auths_allowing_non_root_auth();
+        let (admin, donation_client, _registry_client) = setup(&env);
+        let supporter = Address::generate(&env);
+        let creator = Address::generate(&env);
+        let executor = Address::generate(&env);
+        let token_address = create_token_contract(&env, &admin);
+        donation_client.add_allowed_token(&token_address);
+        StellarAssetClient::new(&env, &token_address).mint(&supporter, &1_000_000);
+        donation_client.register_creator(&creator, &String::from_bytes(&env, b"dev"));
+        donation_client.set_executor(&executor);
+
+        let id = donation_client.subscribe(&supporter, &creator, &token_address, &10, &MONTH_SECS);
+        let token_client = token::Client::new(&env, &token_address);
+        token_client.approve(&supporter, &donation_client.address, &1_000_000, &6_000_000);
+
+        // Charge every month for well over the default TTL; each charge must
+        // renew the entry or the next one would fail.
+        let target = subscription_bump_amount(MONTH_SECS);
+        let month_ledgers = (MONTH_SECS / 5) as u32;
+        let mut elapsed_ledgers: u64 = 0;
+        for round in 1..=8u64 {
+            env.ledger().with_mut(|li| {
+                li.sequence_number += month_ledgers;
+                li.timestamp += MONTH_SECS;
+            });
+            elapsed_ledgers += u64::from(month_ledgers);
+            donation_client.charge_subscription(&executor, &id);
+            assert_eq!(subscription_ttl(&env, &donation_client.address, id), target);
+            assert_eq!(
+                donation_client
+                    .get_subscription(&id)
+                    .unwrap()
+                    .next_charge_at,
+                env.ledger().timestamp() + MONTH_SECS
+            );
+            assert_eq!(donation_client.get_total_donations_count(), round as u32);
+        }
+        assert!(elapsed_ledgers > u64::from(90 * DAY_IN_LEDGERS));
+    }
+
+    #[test]
+    fn test_cancel_subscription_renews_ttl() {
+        use common::{subscription_bump_amount, DAY_IN_LEDGERS};
+
+        let env = Env::default();
+        env.mock_all_auths_allowing_non_root_auth();
+        let (admin, donation_client, _registry_client) = setup(&env);
+        let supporter = Address::generate(&env);
+        let creator = Address::generate(&env);
+        let token_address = create_token_contract(&env, &admin);
+        donation_client.add_allowed_token(&token_address);
+        let id = donation_client.subscribe(&supporter, &creator, &token_address, &100, &MONTH_SECS);
+
+        // Let it decay below its renewal threshold, then cancel.
+        env.ledger().with_mut(|li| {
+            li.sequence_number += subscription_bump_amount(MONTH_SECS) - 20 * DAY_IN_LEDGERS
+        });
+        assert!(
+            subscription_ttl(&env, &donation_client.address, id)
+                < subscription_bump_amount(MONTH_SECS) - 30 * DAY_IN_LEDGERS
+        );
+
+        donation_client.cancel_subscription(&supporter, &id);
+
+        assert_eq!(
+            subscription_ttl(&env, &donation_client.address, id),
+            subscription_bump_amount(MONTH_SECS)
+        );
+        assert!(!donation_client.get_subscription(&id).unwrap().active);
+    }
+
+    #[test]
+    fn test_bump_subscription_keeps_annual_subscription_alive_between_charges() {
+        use common::{subscription_bump_amount, PERSISTENT_MAX_BUMP_AMOUNT};
+
+        let env = Env::default();
+        env.mock_all_auths_allowing_non_root_auth();
+        let (admin, donation_client, _registry_client) = setup(&env);
+        let supporter = Address::generate(&env);
+        let creator = Address::generate(&env);
+        let token_address = create_token_contract(&env, &admin);
+        donation_client.add_allowed_token(&token_address);
+
+        let annual: u64 = 365 * 86_400;
+        let id = donation_client.subscribe(&supporter, &creator, &token_address, &100, &annual);
+        // A year is longer than the cap, so a single extension cannot cover it.
+        assert_eq!(subscription_bump_amount(annual), PERSISTENT_MAX_BUMP_AMOUNT);
+        assert!(u64::from(PERSISTENT_MAX_BUMP_AMOUNT) < annual / 5);
+
+        // Keeper bumps (no auth) on a schedule; the entry never runs out.
+        for _ in 0..6 {
+            env.ledger().with_mut(|li| {
+                li.sequence_number += PERSISTENT_MAX_BUMP_AMOUNT - 29 * common::DAY_IN_LEDGERS
+            });
+            donation_client.bump_subscription(&id);
+            assert_eq!(
+                subscription_ttl(&env, &donation_client.address, id),
+                PERSISTENT_MAX_BUMP_AMOUNT
+            );
+        }
+        assert!(donation_client.get_subscription(&id).unwrap().active);
+    }
+
+    #[test]
+    #[should_panic(expected = "subscription not found")]
+    fn test_bump_subscription_rejects_unknown_id() {
+        let env = Env::default();
+        let (_admin, donation_client, _registry_client) = setup(&env);
+        donation_client.bump_subscription(&99);
     }
 }

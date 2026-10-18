@@ -26,9 +26,16 @@ export const leaderboardQuerySchema = z.object({
 
 const usernamePattern = /^[a-zA-Z0-9_-]{3,30}$/;
 
+// Base64 signature of the message returned by POST /api/auth/challenge for the
+// wallet being linked. Only needed to use a payout wallet other than the one
+// the user signed in with (#276).
+const walletSignature = z.string().min(1).max(512);
+
 export const createCreatorSchema = z.object({
-  // The signup form sends "" when no wallet is connected yet.
+  // Defaults to the authenticated user's own wallet. The signup form sends ""
+  // when no wallet is connected yet.
   walletAddress: stellarAddress.or(z.literal("")).optional(),
+  walletSignature: walletSignature.optional(),
   displayName: z.string().max(80).optional(),
   bio: z.string().max(500).optional(),
   avatarUrl: z.string().url().optional(),
@@ -45,6 +52,7 @@ export const updateCreatorSchema = z.object({
   bio: z.string().max(500).optional(),
   avatarUrl: z.string().url().optional(),
   walletAddress: stellarAddress.optional(),
+  walletSignature: walletSignature.optional(),
   // Values are usually full URLs, but a bare "Website" entry is stored as typed.
   socialLinks: z.record(z.string().max(32), z.string().max(300)).optional(),
   acceptsXlm: z.boolean().optional(),
