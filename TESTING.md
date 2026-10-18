@@ -26,12 +26,16 @@ From `frontend/`:
 ```sh
 npm ci
 npx tsc --noEmit
+npm run lint
 npm test
 npm run build
 ```
 
-`npm test` runs Vitest tests in jsdom. To run the Playwright end-to-end suite,
-install Chromium once and then run:
+`npm test` runs Vitest tests in jsdom. `npm run lint` runs ESLint using the
+flat config in [`frontend/eslint.config.mjs`](frontend/eslint.config.mjs); CI
+runs it as its own step, after the type check and before the test/build
+steps. To run the Playwright end-to-end suite, install Chromium once and then
+run:
 
 ```sh
 npx playwright install chromium
@@ -49,8 +53,7 @@ server must answer on `http://localhost:3000`. Stop a running `npm run dev`
 `PLAYWRIGHT_BASE_URL` changes the URL the tests open. The web server is still
 started and checked at `http://localhost:3000`. CI installs Chromium with its system
 dependencies using `npx playwright install --with-deps chromium` before running
-the same `npm run test:e2e` command. `npm run lint` is also available locally;
-the current CI workflow does not run the frontend linter.
+the same `npm run test:e2e` command.
 
 For errors you see when testing manually against the Stellar testnet (wallet
 network, Friendbot funding, trustlines, contract errors), see
@@ -62,11 +65,18 @@ From `backend/`:
 
 ```sh
 npm ci
+npm run lint
 npm test
 npm run build
 ```
 
-`npm test` runs Jest tests, including HTTP route tests using Supertest. The
+`npm test` runs Jest tests, including HTTP route tests using Supertest. `npm
+run lint` runs ESLint using the flat config in
+[`backend/eslint.config.mjs`](backend/eslint.config.mjs), including the
+type-aware `@typescript-eslint/no-floating-promises` rule (an un-awaited,
+uncaught promise in an Express route handler or the subscription executor's
+background loop is a real bug: a dropped request or a silently-missed
+charge). CI runs it as its own step, right after installing dependencies. The
 build runs `prisma generate` followed by the TypeScript compiler. CI supplies
 `DATABASE_URL=postgresql://postgres:postgres@localhost:5432/supportme?schema=public`
 for this build step.
@@ -87,6 +97,21 @@ rustup target add wasm32v1-none
 cargo build --workspace --target wasm32v1-none --release
 ```
 
+Check formatting and lint with Clippy, both of which CI runs as their own
+steps (`rustfmt` and `clippy` components are installed alongside the
+toolchain):
+
+```sh
+cargo fmt --all -- --check
+cargo clippy --workspace --all-targets -- -D warnings
+```
+
+`cargo fmt --all` (without `--check`) applies the formatting a failing check
+expects. A Clippy warning fails the build (`-D warnings`); fix it, or if it's
+a deliberate false positive, suppress it with a scoped `#[allow(clippy::...)]`
+directly above the specific line along with a one-line reason comment, not a
+blanket module- or crate-level allow.
+
 The Cargo workspace includes the donation and creator-registry contracts, as
 well as shared contract code.
 
@@ -94,15 +119,36 @@ well as shared contract code.
 
 For every pull request targeting `main`, the workflow runs:
 
-- **Contracts:** `cargo test --workspace` and a release build for
-  `wasm32v1-none`.
-- **Backend:** `npm ci`, `npm run build`, and `npm test` in `backend/`.
-- **Frontend:** `npm ci`, `npx tsc --noEmit`, `npm test`, and `npm run build`
-  in `frontend/`.
+- **Contracts:** `cargo fmt --all -- --check`, `cargo test --workspace`,
+  `cargo clippy --workspace --all-targets -- -D warnings`, and a release
+  build for `wasm32v1-none`.
+- **Backend:** `npm ci`, `npm run lint`, `npm run build`, and `npm test` in
+  `backend/`.
+- **Frontend:** `npm ci`, `npx tsc --noEmit`, `npm run lint`, `npm test`, and
+  `npm run build` in `frontend/`.
 - **Frontend E2E:** install Chromium and run `npm run test:e2e` in
   `frontend/`.
+- **Dependency Review:** on pull requests only, flags any dependency change
+  that introduces a new high-severity (or above) vulnerability, via GitHub's
+  [Dependency Review
+  Action](https://github.com/actions/dependency-review-action). This is
+  diff-based: it does not fail on vulnerabilities that already exist on
+  `main` in either `frontend/` or `backend/`'s current dependency tree (see
+  `npm audit` below).
 - **Type drift:** if `contracts/common/src/lib.rs` changes, require a changed
   frontend TypeScript file in the same pull request.
+
+Dependabot (see [`.github/dependabot.yml`](.github/dependabot.yml)) opens
+weekly update pull requests for `frontend/`, `backend/`, the contracts Cargo
+workspace, and the GitHub Actions workflows themselves; minor/patch updates
+within each ecosystem are grouped into a single pull request rather than one
+per dependency. `npm audit --audit-level=high` currently reports pre-existing
+high/critical findings in both `frontend/` and `backend/`'s dependency trees
+(transitive dependencies, not anything this repository's own code depends on
+directly); that is why CI uses the diff-based Dependency Review Action above
+instead of a flat `npm audit` step, which would fail on every pull request
+today regardless of its content. Resolving those pre-existing findings is
+tracked separately from linting/CI setup.
 
 ## Coverage Expectations
 

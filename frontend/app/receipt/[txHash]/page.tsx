@@ -2,6 +2,7 @@
 
 import { use } from 'react';
 import { useSearchParams } from 'next/navigation';
+import Link from 'next/link';
 import { HugeiconsIcon } from '@hugeicons/react';
 import { FileEmpty02Icon, PrinterIcon, ExternalLinkIcon } from '@hugeicons/core-free-icons';
 
@@ -138,9 +139,9 @@ export default function ReceiptPage({ params }: { params: Promise<{ txHash: stri
               This receipt confirms a donation made on the Stellar network. All transactions are publicly verifiable on the blockchain.
             </p>
             <p className="text-xs text-muted font-medium text-center mt-2 print:hidden">
-              <a href="/" className="underline hover:text-ink">
+              <Link href="/" className="underline hover:text-ink">
                 Return to SupportMe
-              </a>
+              </Link>
             </p>
           </div>
         </div>

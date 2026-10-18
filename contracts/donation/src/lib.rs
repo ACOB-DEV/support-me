@@ -6,14 +6,14 @@
 //! contract — this contract talks to it exclusively through cross-contract
 //! calls (`env.invoke_contract`), so the two contracts can be deployed,
 //! upgraded, and audited independently.
-//! 
+//!
 //! # Storage & Rent Tradeoffs
-//! 
-//! To minimize Soroban state rent, the append-only donation log stored in 
+//!
+//! To minimize Soroban state rent, the append-only donation log stored in
 //! this contract operates without explicit `extend_ttl` calls. Over time, as
-//! volume grows, old records may expire and disappear from `get_donation`. 
-//! This is an accepted design choice: the backend indexing `DonatedEvent`s 
-//! is the canonical source of long-term history. Future contract upgrades 
+//! volume grows, old records may expire and disappear from `get_donation`.
+//! This is an accepted design choice: the backend indexing `DonatedEvent`s
+//! is the canonical source of long-term history. Future contract upgrades
 //! should avoid relying on the complete on-chain history being present.
 //!
 //! Multi-signature and timelock governance:
@@ -34,8 +34,8 @@ use common::{
     DonationRecord, Subscription,
 };
 use soroban_sdk::{
-    contract, contracterror, contractevent, contractimpl, symbol_short, token, Address, Env, IntoVal, String,
-    Symbol, Val, Vec,
+    contract, contracterror, contractevent, contractimpl, symbol_short, token, Address, Env,
+    IntoVal, String, Symbol, Val, Vec,
 };
 
 const DONATIONS_KEY: Symbol = symbol_short!("donations");
@@ -186,7 +186,9 @@ impl DonationContract {
         env.storage().instance().set(&ADMIN_KEY, &primary_admin);
         env.storage().instance().set(&ADMINS_KEY, &admins);
         env.storage().instance().set(&THRESHOLD_KEY, &threshold);
-        env.storage().instance().set(&TIMELOCK_DELAY_KEY, &timelock_delay);
+        env.storage()
+            .instance()
+            .set(&TIMELOCK_DELAY_KEY, &timelock_delay);
         env.storage().instance().set(&PAUSED_KEY, &false);
         env.storage().instance().set(&REGISTRY_KEY, &registry);
         extend_instance_ttl(&env);
@@ -228,8 +230,16 @@ impl DonationContract {
         assert!(Self::is_admin(env.clone(), proposer.clone()), "proposer is not an admin");
         extend_instance_ttl(&env);
 
-        let prop_id: u64 = env.storage().persistent().get(&PROPOSAL_COUNTER_KEY).unwrap_or(0);
-        let timelock: u64 = env.storage().instance().get(&TIMELOCK_DELAY_KEY).unwrap_or(0);
+        let prop_id: u64 = env
+            .storage()
+            .persistent()
+            .get(&PROPOSAL_COUNTER_KEY)
+            .unwrap_or(0);
+        let timelock: u64 = env
+            .storage()
+            .instance()
+            .get(&TIMELOCK_DELAY_KEY)
+            .unwrap_or(0);
         let now = env.ledger().timestamp();
         let eta = now.checked_add(timelock).expect("proposal eta overflow");
 
@@ -243,8 +253,12 @@ impl DonationContract {
             executed: false,
         };
 
-        env.storage().persistent().set(&(PROPOSAL_KEY, prop_id), &proposal);
-        env.storage().persistent().set(&(APPROVAL_KEY, prop_id, proposer.clone()), &true);
+        env.storage()
+            .persistent()
+            .set(&(PROPOSAL_KEY, prop_id), &proposal);
+        env.storage()
+            .persistent()
+            .set(&(APPROVAL_KEY, prop_id, proposer.clone()), &true);
         env.storage().persistent().set(
             &PROPOSAL_COUNTER_KEY,
             &prop_id.checked_add(1).expect("proposal counter overflow"),
@@ -263,7 +277,10 @@ impl DonationContract {
     /// Approves an existing administrative proposal.
     pub fn approve_admin_action(env: Env, admin: Address, proposal_id: u64) {
         admin.require_auth();
-        assert!(Self::is_admin(env.clone(), admin.clone()), "caller is not an admin");
+        assert!(
+            Self::is_admin(env.clone(), admin.clone()),
+            "caller is not an admin"
+        );
 
         let mut proposal: AdminProposal = env
             .storage()
@@ -280,12 +297,16 @@ impl DonationContract {
         assert!(!has_approved, "admin has already approved this proposal");
         extend_instance_ttl(&env);
 
-        env.storage().persistent().set(&(APPROVAL_KEY, proposal_id, admin.clone()), &true);
+        env.storage()
+            .persistent()
+            .set(&(APPROVAL_KEY, proposal_id, admin.clone()), &true);
         proposal.approvals_count = proposal
             .approvals_count
             .checked_add(1)
             .expect("approvals count overflow");
-        env.storage().persistent().set(&(PROPOSAL_KEY, proposal_id), &proposal);
+        env.storage()
+            .persistent()
+            .set(&(PROPOSAL_KEY, proposal_id), &proposal);
 
         ProposalApprovedEvent {
             proposal_id,
@@ -298,7 +319,10 @@ impl DonationContract {
     /// Executes an administrative proposal once signature threshold & timelock criteria are met.
     pub fn execute_admin_action(env: Env, executor: Address, proposal_id: u64) {
         executor.require_auth();
-        assert!(Self::is_admin(env.clone(), executor.clone()), "caller is not an admin");
+        assert!(
+            Self::is_admin(env.clone(), executor.clone()),
+            "caller is not an admin"
+        );
 
         let mut proposal: AdminProposal = env
             .storage()
@@ -307,7 +331,11 @@ impl DonationContract {
             .expect("proposal not found");
         assert!(!proposal.executed, "proposal already executed");
 
-        let threshold: u32 = env.storage().instance().get(&THRESHOLD_KEY).expect("threshold not set");
+        let threshold: u32 = env
+            .storage()
+            .instance()
+            .get(&THRESHOLD_KEY)
+            .expect("threshold not set");
         assert!(
             proposal.approvals_count >= threshold,
             "insufficient signatures to execute proposal"
@@ -340,9 +368,12 @@ impl DonationContract {
                         new_admins.push_back(a);
                     }
                 }
-                assert!(new_admins.len() > 0, "cannot remove all admins");
+                assert!(!new_admins.is_empty(), "cannot remove all admins");
                 let threshold: u32 = env.storage().instance().get(&THRESHOLD_KEY).unwrap();
-                assert!(threshold <= new_admins.len(), "threshold exceeds remaining admin count");
+                assert!(
+                    threshold <= new_admins.len(),
+                    "threshold exceeds remaining admin count"
+                );
                 env.storage().instance().set(&ADMINS_KEY, &new_admins);
             }
             AdminAction::SetThreshold(new_threshold) => {
@@ -362,7 +393,9 @@ impl DonationContract {
         }
 
         proposal.executed = true;
-        env.storage().persistent().set(&(PROPOSAL_KEY, proposal_id), &proposal);
+        env.storage()
+            .persistent()
+            .set(&(PROPOSAL_KEY, proposal_id), &proposal);
 
         ProposalExecutedEvent {
             proposal_id,
@@ -472,9 +505,9 @@ impl DonationContract {
     /// Transfer `amount` of `token` from `donor` to `creator`, record the
     /// donation locally, and notify the CreatorRegistry (cross-contract) so
     /// the creator's lifetime stats stay in sync.
-    /// 
+    ///
     /// NOTE ON TTL: The donation record is stored with the network's default TTL.
-    /// To minimize rent costs on an indefinitely growing append-only log, this 
+    /// To minimize rent costs on an indefinitely growing append-only log, this
     /// contract does not call `extend_ttl` for old records. They are allowed to expire,
     /// with the backend relying on emitted `DonatedEvent`s for history instead.
     pub fn donate(
@@ -485,7 +518,10 @@ impl DonationContract {
         amount: i128,
         memo: String,
     ) -> DonationRecord {
-        assert!(!Self::is_paused(env.clone()), "contract is currently paused");
+        assert!(
+            !Self::is_paused(env.clone()),
+            "contract is currently paused"
+        );
         donor.require_auth();
         assert!(amount > 0, "Donation amount must be positive");
 
@@ -515,7 +551,11 @@ impl DonationContract {
         let registry = Self::registry_address(&env);
         let record_args: Vec<Val> =
             (env.current_contract_address(), creator.clone(), amount).into_val(&env);
-        let (): () = env.invoke_contract(&registry, &Symbol::new(&env, "record_donation"), record_args);
+        let (): () = env.invoke_contract(
+            &registry,
+            &Symbol::new(&env, "record_donation"),
+            record_args,
+        );
 
         let donation = DonationRecord {
             donor: donor.clone(),
@@ -535,12 +575,10 @@ impl DonationContract {
         env.storage()
             .persistent()
             .set(&(DONATIONS_KEY, counter), &donation);
-        env.storage()
-            .persistent()
-            .set(
-                &DONATION_COUNTER,
-                &counter.checked_add(1).expect("donation counter overflow"),
-            );
+        env.storage().persistent().set(
+            &DONATION_COUNTER,
+            &counter.checked_add(1).expect("donation counter overflow"),
+        );
 
         DonatedEvent {
             donor,
@@ -564,7 +602,10 @@ impl DonationContract {
         amount: i128,
         interval_secs: u64,
     ) -> u64 {
-        assert!(!Self::is_paused(env.clone()), "contract is currently paused");
+        assert!(
+            !Self::is_paused(env.clone()),
+            "contract is currently paused"
+        );
         supporter.require_auth();
         assert!(amount > 0, "Subscription amount must be positive");
         assert!(interval_secs > 0, "Interval must be positive");
@@ -616,8 +657,15 @@ impl DonationContract {
     /// allowance the supporter granted this contract, then records and
     /// reports it exactly like a one-off `donate`. Callable only by the
     /// authorized executor (see `set_executor`).
-    pub fn charge_subscription(env: Env, executor: Address, subscription_id: u64) -> Result<DonationRecord, ChargeError> {
-        assert!(!Self::is_paused(env.clone()), "contract is currently paused");
+    pub fn charge_subscription(
+        env: Env,
+        executor: Address,
+        subscription_id: u64,
+    ) -> Result<DonationRecord, ChargeError> {
+        assert!(
+            !Self::is_paused(env.clone()),
+            "contract is currently paused"
+        );
         executor.require_auth();
         let authorized_executor: Address = env
             .storage()
@@ -638,11 +686,15 @@ impl DonationContract {
         assert!(subscription.active, "subscription is not active");
 
         let now = env.ledger().timestamp();
-        assert!(now >= subscription.next_charge_at, "subscription not yet due");
+        assert!(
+            now >= subscription.next_charge_at,
+            "subscription not yet due"
+        );
 
         let token_client = token::Client::new(&env, &subscription.token);
-        
-        let allowance = token_client.allowance(&subscription.supporter, &env.current_contract_address());
+
+        let allowance =
+            token_client.allowance(&subscription.supporter, &env.current_contract_address());
         if allowance < subscription.amount {
             SubscriptionChargeFailedEvent {
                 supporter: subscription.supporter.clone(),
@@ -693,8 +745,11 @@ impl DonationContract {
             subscription.amount,
         )
             .into_val(&env);
-        let (): () =
-            env.invoke_contract(&registry, &Symbol::new(&env, "record_donation"), record_args);
+        let (): () = env.invoke_contract(
+            &registry,
+            &Symbol::new(&env, "record_donation"),
+            record_args,
+        );
 
         let memo = String::from_str(&env, "recurring");
         let donation = DonationRecord {
@@ -714,12 +769,10 @@ impl DonationContract {
         env.storage()
             .persistent()
             .set(&(DONATIONS_KEY, counter), &donation);
-        env.storage()
-            .persistent()
-            .set(
-                &DONATION_COUNTER,
-                &counter.checked_add(1).expect("donation counter overflow"),
-            );
+        env.storage().persistent().set(
+            &DONATION_COUNTER,
+            &counter.checked_add(1).expect("donation counter overflow"),
+        );
 
         DonatedEvent {
             donor: subscription.supporter.clone(),
@@ -796,13 +849,13 @@ impl DonationContract {
     }
 
     /// Get all donations count (approximate, stored in counter)
-    /// 
+    ///
     /// NOTE ON STORAGE GROWTH & TTL: The donations log is an append-only structure.
     /// It grows indefinitely, which means state rent accumulates over time.
     /// To avoid unbounded rent costs for the contract, we do not explicitly extend
-    /// the TTL of old donation records. If old records expire due to un-extended 
-    /// TTLs, this function's counter remains valid, but `get_donation` may fail 
-    /// to find them. This is an accepted tradeoff since the emitted `DonatedEvent`s 
+    /// the TTL of old donation records. If old records expire due to un-extended
+    /// TTLs, this function's counter remains valid, but `get_donation` may fail
+    /// to find them. This is an accepted tradeoff since the emitted `DonatedEvent`s
     /// (indexed off-chain) are the canonical long-term record.
     pub fn get_total_donations_count(env: Env) -> u32 {
         env.storage()
@@ -812,12 +865,12 @@ impl DonationContract {
     }
 
     /// Fetch a single donation record by its counter-based index.
-    /// 
-    /// NOTE: Donation records are subject to Soroban's state expiry. 
-    /// Because the on-chain donation log is append-only and grows indefinitely, 
-    /// the contract does not explicitly extend the TTL of these records to save 
+    ///
+    /// NOTE: Donation records are subject to Soroban's state expiry.
+    /// Because the on-chain donation log is append-only and grows indefinitely,
+    /// the contract does not explicitly extend the TTL of these records to save
     /// on state rent. If a record has expired, this function will return `None`.
-    /// Downstream applications should rely on off-chain indexed `DonatedEvent`s 
+    /// Downstream applications should rely on off-chain indexed `DonatedEvent`s
     /// as the canonical historical record, rather than depending on this function
     /// for long-term historical data.
     pub fn get_donation(env: Env, index: u32) -> Option<DonationRecord> {
@@ -901,7 +954,8 @@ mod tests {
         let creator = Address::generate(&env);
         env.ledger().with_mut(|li| li.sequence_number = 100);
 
-        let profile = donation_client.register_creator(&creator, &String::from_bytes(&env, b"awesome_dev"));
+        let profile =
+            donation_client.register_creator(&creator, &String::from_bytes(&env, b"awesome_dev"));
 
         assert_eq!(profile.donation_count, 0);
         assert_eq!(profile.total_donations, 0);
@@ -925,11 +979,12 @@ mod tests {
         // 2-of-3 threshold with 100 seconds timelock delay
         let (donation_client, _registry_client) = deploy_pair(&env, admins, 2, 100);
 
-        let prop_id = donation_client.propose_admin_action(&admin1, &AdminAction::SetExecutor(executor.clone()));
+        let prop_id = donation_client
+            .propose_admin_action(&admin1, &AdminAction::SetExecutor(executor.clone()));
 
         let prop = donation_client.get_proposal(&prop_id).unwrap();
         assert_eq!(prop.approvals_count, 1);
-        assert_eq!(prop.executed, false);
+        assert!(!prop.executed);
 
         donation_client.approve_admin_action(&admin2, &prop_id);
 
@@ -942,7 +997,7 @@ mod tests {
         donation_client.execute_admin_action(&admin1, &prop_id);
 
         let prop_exec = donation_client.get_proposal(&prop_id).unwrap();
-        assert_eq!(prop_exec.executed, true);
+        assert!(prop_exec.executed);
     }
 
     #[test]
@@ -951,9 +1006,9 @@ mod tests {
         env.mock_all_auths_allowing_non_root_auth();
         let (admin, donation_client, _registry_client) = setup(&env);
 
-        assert_eq!(donation_client.is_paused(), false);
+        assert!(!donation_client.is_paused());
         donation_client.emergency_pause(&admin);
-        assert_eq!(donation_client.is_paused(), true);
+        assert!(donation_client.is_paused());
     }
 
     #[test]
@@ -985,7 +1040,10 @@ mod tests {
         assert_eq!(donation.donor, donor);
         assert_eq!(donation.creator, creator);
         assert_eq!(donation.memo, String::from_bytes(&env, b"Great work!"));
-        assert_eq!(donation_client.get_donation(&0).unwrap().memo, donation.memo);
+        assert_eq!(
+            donation_client.get_donation(&0).unwrap().memo,
+            donation.memo
+        );
 
         let token_client = token::Client::new(&env, &token_address);
         assert_eq!(token_client.balance(&creator), 1000);
@@ -1109,8 +1167,20 @@ mod tests {
         donation_client.add_allowed_token(&token_address);
         StellarAssetClient::new(&env, &token_address).mint(&donor, &10_000);
 
-        donation_client.donate(&donor, &creator, &token_address, &100, &String::from_bytes(&env, b"one"));
-        donation_client.donate(&donor, &creator, &token_address, &200, &String::from_bytes(&env, b"two"));
+        donation_client.donate(
+            &donor,
+            &creator,
+            &token_address,
+            &100,
+            &String::from_bytes(&env, b"one"),
+        );
+        donation_client.donate(
+            &donor,
+            &creator,
+            &token_address,
+            &200,
+            &String::from_bytes(&env, b"two"),
+        );
 
         assert_eq!(donation_client.get_total_donations_count(), 2);
         assert_eq!(donation_client.get_donation(&0).unwrap().amount, 100);
@@ -1240,12 +1310,18 @@ mod tests {
 
         let token_client = token::Client::new(&env, &token_address);
         token_client.approve(&supporter, &donation_client.address, &500, &1_000);
-        assert_eq!(token_client.allowance(&supporter, &donation_client.address), 500);
+        assert_eq!(
+            token_client.allowance(&supporter, &donation_client.address),
+            500
+        );
 
         donation_client.cancel_subscription(&supporter, &id);
 
         assert!(!donation_client.get_subscription(&id).unwrap().active);
-        assert_eq!(token_client.allowance(&supporter, &donation_client.address), 0);
+        assert_eq!(
+            token_client.allowance(&supporter, &donation_client.address),
+            0
+        );
     }
 
     #[test]
@@ -1297,7 +1373,7 @@ mod tests {
 
         let donor = Address::generate(&env);
         let creator = Address::generate(&env);
-        
+
         let token_address = env.register_stellar_asset_contract_v2(admin).address();
         StellarAssetClient::new(&env, &token_address).mint(&donor, &1_000);
 
@@ -1319,7 +1395,7 @@ mod tests {
 
         let supporter = Address::generate(&env);
         let creator = Address::generate(&env);
-        
+
         let token_address = env.register_stellar_asset_contract_v2(admin).address();
 
         env.ledger().with_mut(|li| li.timestamp = 1_000);
@@ -1349,9 +1425,12 @@ mod tests {
         token_client.approve(&supporter, &donation_client.address, &100, &1_000);
 
         env.ledger().with_mut(|li| li.timestamp = 2_000);
-        
+
         let result = donation_client.try_charge_subscription(&executor, &id);
-        assert_eq!(result.unwrap_err().unwrap(), ChargeError::InsufficientAllowance);
+        assert_eq!(
+            result.unwrap_err().unwrap(),
+            ChargeError::InsufficientAllowance
+        );
     }
 
     #[test]
@@ -1377,9 +1456,12 @@ mod tests {
         token_client.approve(&supporter, &donation_client.address, &1000, &1_000);
 
         env.ledger().with_mut(|li| li.timestamp = 2_000);
-        
+
         let result = donation_client.try_charge_subscription(&executor, &id);
-        assert_eq!(result.unwrap_err().unwrap(), ChargeError::InsufficientBalance);
+        assert_eq!(
+            result.unwrap_err().unwrap(),
+            ChargeError::InsufficientBalance
+        );
     }
 
     // --- charge_subscription edge cases ---------------------------------
@@ -1416,7 +1498,15 @@ mod tests {
             &allowance,
             &1_000,
         );
-        (admin, donation_client, supporter, creator, executor, token_address, id)
+        (
+            admin,
+            donation_client,
+            supporter,
+            creator,
+            executor,
+            token_address,
+            id,
+        )
     }
 
     #[test]
@@ -1430,7 +1520,10 @@ mod tests {
         env.ledger().with_mut(|li| li.timestamp = 2_000);
         donation_client.charge_subscription(&executor, &id);
 
-        assert_eq!(token::Client::new(&env, &token_address).balance(&creator), 500);
+        assert_eq!(
+            token::Client::new(&env, &token_address).balance(&creator),
+            500
+        );
     }
 
     #[test]
@@ -1473,7 +1566,10 @@ mod tests {
 
         env.ledger().with_mut(|li| li.timestamp = 2_000);
         let result = donation_client.try_charge_subscription(&executor, &id);
-        assert_eq!(result.unwrap_err().unwrap(), ChargeError::InsufficientAllowance);
+        assert_eq!(
+            result.unwrap_err().unwrap(),
+            ChargeError::InsufficientAllowance
+        );
 
         // A failed attempt must not advance the schedule, so it can be retried
         // as soon as the supporter fixes their allowance.
@@ -1493,7 +1589,9 @@ mod tests {
             subscription_fixture(&env, 10_000, 100);
 
         env.ledger().with_mut(|li| li.timestamp = 2_000);
-        assert!(donation_client.try_charge_subscription(&executor, &id).is_err());
+        assert!(donation_client
+            .try_charge_subscription(&executor, &id)
+            .is_err());
 
         let token_client = token::Client::new(&env, &token_address);
         token_client.approve(&supporter, &donation_client.address, &500, &1_000);
@@ -1652,7 +1750,10 @@ mod tests {
             assert_eq!(creator_received + record.fee_amount, record.amount);
 
             // Invariant 3: Balances update exactly by transferred amount
-            assert_eq!(token_client.balance(&donor), initial_donor_balance - donated_so_far);
+            assert_eq!(
+                token_client.balance(&donor),
+                initial_donor_balance - donated_so_far
+            );
             assert_eq!(token_client.balance(&creator), donated_so_far);
             // Invariant 4: No funds trapped in contract
             assert_eq!(token_client.balance(&donation_client.address), 0);
@@ -1674,15 +1775,18 @@ mod tests {
         // Without mock_all_auths on the unauthorized caller, privileged calls must fail
         assert!(std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
             donation_client.add_allowed_token(&random_token);
-        })).is_err());
+        }))
+        .is_err());
 
         assert!(std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
             donation_client.set_executor(&random_executor);
-        })).is_err());
+        }))
+        .is_err());
 
         assert!(std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
             donation_client.emergency_pause(&_unauthorized_caller);
-        })).is_err());
+        }))
+        .is_err());
     }
 
     #[test]
@@ -1706,7 +1810,8 @@ mod tests {
                 &0,
                 &String::from_bytes(&env, b"zero"),
             );
-        })).is_err());
+        }))
+        .is_err());
 
         // 2. Negative amount must panic
         assert!(std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
@@ -1717,7 +1822,8 @@ mod tests {
                 &-500,
                 &String::from_bytes(&env, b"negative"),
             );
-        })).is_err());
+        }))
+        .is_err());
 
         // 3. Memo exceeding MAX_MEMO_LENGTH (140 bytes) must panic
         let long_memo_bytes = [b'a'; 141];
@@ -1729,7 +1835,8 @@ mod tests {
                 &100,
                 &String::from_bytes(&env, &long_memo_bytes),
             );
-        })).is_err());
+        }))
+        .is_err());
 
         // 4. Exactly 140 bytes memo must succeed
         let max_valid_memo = [b'b'; 140];
@@ -1752,7 +1859,8 @@ mod tests {
                 &100,
                 &String::from_bytes(&env, b"unallowed"),
             );
-        })).is_err());
+        }))
+        .is_err());
     }
 
     use proptest::prelude::*;
@@ -1881,12 +1989,20 @@ mod tests {
         donation_client.charge_subscription(&executor, &id);
 
         // The reschedule and the transfer land together.
-        assert_eq!(donation_client.get_subscription(&id).unwrap().next_charge_at, 3_500);
+        assert_eq!(
+            donation_client
+                .get_subscription(&id)
+                .unwrap()
+                .next_charge_at,
+            3_500
+        );
         assert_eq!(token_client.balance(&creator), 500);
 
         // A second charge in the same period is rejected because the new
         // schedule was already persisted.
-        assert!(donation_client.try_charge_subscription(&executor, &id).is_err());
+        assert!(donation_client
+            .try_charge_subscription(&executor, &id)
+            .is_err());
         assert_eq!(token_client.balance(&creator), 500);
     }
 
@@ -1911,8 +2027,17 @@ mod tests {
 
         env.ledger().with_mut(|li| li.timestamp = 2_000);
         let result = donation_client.try_charge_subscription(&executor, &id);
-        assert_eq!(result.unwrap_err().unwrap(), ChargeError::InsufficientBalance);
-        assert_eq!(donation_client.get_subscription(&id).unwrap().next_charge_at, 2_000);
+        assert_eq!(
+            result.unwrap_err().unwrap(),
+            ChargeError::InsufficientBalance
+        );
+        assert_eq!(
+            donation_client
+                .get_subscription(&id)
+                .unwrap()
+                .next_charge_at,
+            2_000
+        );
     }
 
     #[test]
