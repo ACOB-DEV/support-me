@@ -49,7 +49,10 @@ Register a new creator profile.
 
 **Parameters:**
 - `creator`: Creator's address (must sign transaction)
-- `username`: Unique username for the creator
+- `username`: Unique username for the creator: 1-32 bytes of `a-z`, `0-9`, `_`
+  or `-`. The registry rejects empty, oversized, invalid and already-taken
+  usernames with distinct `RegistryError`s (`EmptyUsername`,
+  `UsernameTooLong`, `InvalidUsernameChars`, `UsernameTaken`).
 
 **Returns:** `CreatorProfile` object
 
@@ -182,6 +185,47 @@ Data: (donor_address, creator_address, amount, memo, timestamp, token_address)
 2. **Validation**: Amounts must be positive
 3. **Creator Flexibility**: Creators don't need to pre-register to receive donations
 4. **Immutability**: All donation records are immutable once recorded
+
+## Deployment and initialization
+
+The contract has no `initialize` entry point. It is configured by its
+constructor, which runs inside the deploy transaction, so nobody can front-run
+the deployer to claim the admin set:
+
+```rust
+pub fn __constructor(
+    env: Env,
+    admins: Vec<Address>,   // first entry is the primary admin
+    threshold: u32,         // 1..=admins.len()
+    timelock_delay: u64,    // seconds
+    registry: Address,      // CreatorRegistry contract ID
+)
+```
+
+The creator-registry contract takes the same arguments, with
+`donation_contract` in place of `registry`. Since each contract needs the
+other's ID, `make deploy` derives the registry ID from a salt, deploys this
+contract with it, then deploys the registry at that salt:
+
+```bash
+make deploy SOURCE=<deployer-key-alias> ADMINS='["<ADMIN_ADDRESS>"]'
+# multi-admin:
+make deploy SOURCE=<deployer-key-alias> \
+  ADMINS='["<ADMIN_1>","<ADMIN_2>","<ADMIN_3>"]' THRESHOLD=2 TIMELOCK_DELAY=86400
+```
+
+`NETWORK` defaults to `testnet`; pass `SALT=<64 hex chars>` to reuse a recorded
+salt. See [`docs/contract-deploy-workflow.md`](../../docs/contract-deploy-workflow.md)
+for the manual CLI steps and verification.
+
+## Keeping the contract live
+
+Admins, threshold, registry, executor, the pause flag and the token allowlist
+live in instance storage. Every state-changing call extends the instance TTL
+to ~30 days whenever less than ~29 days remain (`INSTANCE_BUMP_AMOUNT` /
+`INSTANCE_LIFETIME_THRESHOLD` in the `common` crate). During quiet periods,
+call the permissionless `bump()` on both contracts on a schedule so they are
+not archived.
 
 ## Building
 

@@ -10,12 +10,26 @@
 //! Multi-signature and timelock governance:
 //! High-risk administrative actions (repointing the donation contract,
 //! rotating admins, modifying threshold) require multi-signature approval and
-//! timelock delay before execution.
+//! timelock delay before execution. Only `SetDonationContract`, `AddAdmin`,
+//! `RemoveAdmin` and `SetThreshold` apply to the registry; any other action is
+//! rejected at proposal time with [`RegistryError::UnsupportedAction`].
+//!
+//! Initialization happens atomically at deploy time through `__constructor`;
+//! there is no separate public initializer that could be front-run.
+//!
+//! Usernames are 1-[`MAX_USERNAME_LENGTH`] bytes of `a-z`, `0-9`, `_` or `-`
+//! and are unique: a `(USERNAME_KEY, username) -> Address` index backs
+//! `get_creator_by_username`.
+//!
+//! Instance TTL is extended on every state-changing call; see the `common`
+//! crate docs for the TTL constants.
 
-use common::{AdminAction, AdminProposal, CreatorProfile};
+use common::{
+    extend_instance_ttl, validate_admin_set, AdminAction, AdminProposal, CreatorProfile,
+};
 use soroban_sdk::{
-    contract, contractevent, contractimpl, symbol_short, Address, Env, String, Symbol,
-    Vec,
+    contract, contracterror, contractevent, contractimpl, panic_with_error, symbol_short,
+    Address, Env, String, Symbol, Vec,
 };
 
 const ADMIN_KEY: Symbol = symbol_short!("admin");
@@ -27,6 +41,21 @@ const PROPOSAL_KEY: Symbol = symbol_short!("proposal");
 const APPROVAL_KEY: Symbol = symbol_short!("approval");
 const DONATION_KEY: Symbol = symbol_short!("don_ctr");
 const GOAL_KEY: Symbol = symbol_short!("goal");
+const USERNAME_KEY: Symbol = symbol_short!("uname");
+
+/// Maximum username length, in bytes.
+pub const MAX_USERNAME_LENGTH: u32 = 32;
+
+#[contracterror]
+#[derive(Copy, Clone, Debug, Eq, PartialEq, PartialOrd, Ord)]
+#[repr(u32)]
+pub enum RegistryError {
+    EmptyUsername = 1,
+    UsernameTooLong = 2,
+    InvalidUsernameChars = 3,
+    UsernameTaken = 4,
+    UnsupportedAction = 5,
+}
 
 /// Emitted whenever a new creator profile is registered.
 #[contractevent(topics = ["created"])]
@@ -90,43 +119,18 @@ pub struct CreatorRegistryContract;
 
 #[contractimpl]
 impl CreatorRegistryContract {
-    /// One-time setup. `donation_contract` is the only address that will be
-    /// permitted to call `record_donation`.
-    pub fn initialize(env: Env, admin: Address, donation_contract: Address) {
-        admin.require_auth();
-        assert!(
-            !env.storage().instance().has(&ADMIN_KEY) && !env.storage().instance().has(&ADMINS_KEY),
-            "registry already initialized"
-        );
-
-        let mut admins = Vec::new(&env);
-        admins.push_back(admin.clone());
-
-        env.storage().instance().set(&ADMIN_KEY, &admin);
-        env.storage().instance().set(&ADMINS_KEY, &admins);
-        env.storage().instance().set(&THRESHOLD_KEY, &1u32);
-        env.storage().instance().set(&TIMELOCK_DELAY_KEY, &0u64);
-        env.storage().instance().set(&DONATION_KEY, &donation_contract);
-    }
-
-    /// One-time multi-sig setup: configures admin list, threshold, and timelock delay.
-    pub fn initialize_multisig(
+    /// Runs atomically as part of deployment, so no one can race the deployer
+    /// to claim the admin set. `donation_contract` is the only address that
+    /// will be permitted to call `record_donation`; `admins[0]` is the primary
+    /// admin used by the 1-of-1 `set_donation_contract` shortcut.
+    pub fn __constructor(
         env: Env,
         admins: Vec<Address>,
         threshold: u32,
         timelock_delay: u64,
         donation_contract: Address,
     ) {
-        assert!(
-            !env.storage().instance().has(&ADMIN_KEY) && !env.storage().instance().has(&ADMINS_KEY),
-            "registry already initialized"
-        );
-        assert!(admins.len() > 0, "admin list cannot be empty");
-        assert!(threshold > 0 && threshold <= admins.len(), "invalid signature threshold");
-
-        for i in 0..admins.len() {
-            admins.get(i).unwrap().require_auth();
-        }
+        validate_admin_set(&admins, threshold);
 
         let primary_admin = admins.get(0).unwrap();
         env.storage().instance().set(&ADMIN_KEY, &primary_admin);
@@ -134,6 +138,13 @@ impl CreatorRegistryContract {
         env.storage().instance().set(&THRESHOLD_KEY, &threshold);
         env.storage().instance().set(&TIMELOCK_DELAY_KEY, &timelock_delay);
         env.storage().instance().set(&DONATION_KEY, &donation_contract);
+        extend_instance_ttl(&env);
+    }
+
+    /// Permissionless keep-alive: extends the instance TTL so the registry is
+    /// not archived during long periods without other state-changing calls.
+    pub fn bump(env: Env) {
+        extend_instance_ttl(&env);
     }
 
     /// Returns whether a given address is an authorized contract admin.
@@ -155,6 +166,10 @@ impl CreatorRegistryContract {
     pub fn propose_admin_action(env: Env, proposer: Address, action: AdminAction) -> u64 {
         proposer.require_auth();
         assert!(Self::is_admin(env.clone(), proposer.clone()), "proposer is not an admin");
+        if !Self::is_supported_action(&action) {
+            panic_with_error!(&env, RegistryError::UnsupportedAction);
+        }
+        extend_instance_ttl(&env);
 
         let prop_id: u64 = env.storage().persistent().get(&PROPOSAL_COUNTER_KEY).unwrap_or(0);
         let timelock: u64 = env.storage().instance().get(&TIMELOCK_DELAY_KEY).unwrap_or(0);
@@ -206,6 +221,7 @@ impl CreatorRegistryContract {
             .get(&(APPROVAL_KEY, proposal_id, admin.clone()))
             .unwrap_or(false);
         assert!(!has_approved, "admin has already approved this proposal");
+        extend_instance_ttl(&env);
 
         env.storage().persistent().set(&(APPROVAL_KEY, proposal_id, admin.clone()), &true);
         proposal.approvals_count = proposal
@@ -242,6 +258,7 @@ impl CreatorRegistryContract {
 
         let now = env.ledger().timestamp();
         assert!(now >= proposal.eta, "proposal timelock delay has not elapsed");
+        extend_instance_ttl(&env);
 
         match proposal.action.clone() {
             AdminAction::SetDonationContract(target) => {
@@ -276,7 +293,11 @@ impl CreatorRegistryContract {
                 );
                 env.storage().instance().set(&THRESHOLD_KEY, &new_threshold);
             }
-            _ => {}
+            // Rejected in `propose_admin_action`; refuse to mark them executed
+            // in case one was stored before that check existed.
+            AdminAction::SetExecutor(_) | AdminAction::Pause | AdminAction::Unpause => {
+                panic_with_error!(&env, RegistryError::UnsupportedAction);
+            }
         }
 
         proposal.executed = true;
@@ -301,15 +322,24 @@ impl CreatorRegistryContract {
                 .expect("registry not initialized");
             admin.require_auth();
             env.storage().instance().set(&DONATION_KEY, &donation_contract);
+            extend_instance_ttl(&env);
         } else {
             panic!("multi-sig required: use propose_admin_action to set donation contract");
         }
     }
 
     /// Register a new creator profile. Must be signed by the creator.
+    /// `username` must be 1-`MAX_USERNAME_LENGTH` bytes of `a-z`, `0-9`, `_`
+    /// or `-`, and not already taken by another creator.
     pub fn register_creator(env: Env, creator: Address, username: String) -> CreatorProfile {
         creator.require_auth();
-        
+        Self::validate_username(&env, &username);
+        let username_key = (USERNAME_KEY, username.clone());
+        if env.storage().persistent().has(&username_key) {
+            panic_with_error!(&env, RegistryError::UsernameTaken);
+        }
+        extend_instance_ttl(&env);
+
         let profile = if let Some(p) = env.storage().persistent().get::<_, CreatorProfile>(&creator) {
             // If the profile exists, it must be a placeholder created by record_donation
             assert!(
@@ -334,6 +364,7 @@ impl CreatorRegistryContract {
         };
 
         env.storage().persistent().set(&creator, &profile);
+        env.storage().persistent().set(&username_key, &creator);
         CreatedEvent { creator, username }.publish(&env);
 
         profile
@@ -348,6 +379,12 @@ impl CreatorRegistryContract {
             }
         }
         None
+    }
+
+    /// Look up a registered creator's profile by username.
+    pub fn get_creator_by_username(env: Env, username: String) -> Option<CreatorProfile> {
+        let creator: Address = env.storage().persistent().get(&(USERNAME_KEY, username))?;
+        Self::get_creator(env, creator)
     }
 
     /// Cross-contract entry point: only the authorized donation contract may
@@ -365,6 +402,7 @@ impl CreatorRegistryContract {
             "caller is not the authorized donation contract"
         );
         assert!(amount > 0, "amount must be positive");
+        extend_instance_ttl(&env);
 
         let mut profile = env
             .storage()
@@ -404,6 +442,7 @@ impl CreatorRegistryContract {
     pub fn set_goal(env: Env, creator: Address, goal_amount: i128) {
         creator.require_auth();
         assert!(goal_amount >= 0, "Goal amount cannot be negative");
+        extend_instance_ttl(&env);
 
         env.storage().persistent().set(&(GOAL_KEY, creator.clone()), &goal_amount);
 
@@ -420,6 +459,36 @@ impl CreatorRegistryContract {
         env.storage().persistent().get(&(GOAL_KEY, creator))
     }
 
+    /// Whether `action` has an effect on the registry. Exhaustive on purpose:
+    /// adding an `AdminAction` variant must force a decision here.
+    fn is_supported_action(action: &AdminAction) -> bool {
+        match action {
+            AdminAction::SetDonationContract(_)
+            | AdminAction::AddAdmin(_)
+            | AdminAction::RemoveAdmin(_)
+            | AdminAction::SetThreshold(_) => true,
+            AdminAction::SetExecutor(_) | AdminAction::Pause | AdminAction::Unpause => false,
+        }
+    }
+
+    fn validate_username(env: &Env, username: &String) {
+        let len = username.len();
+        if len == 0 {
+            panic_with_error!(env, RegistryError::EmptyUsername);
+        }
+        if len > MAX_USERNAME_LENGTH {
+            panic_with_error!(env, RegistryError::UsernameTooLong);
+        }
+        let mut buf = [0u8; MAX_USERNAME_LENGTH as usize];
+        let bytes = &mut buf[..len as usize];
+        username.copy_into_slice(bytes);
+        for b in bytes.iter() {
+            if !matches!(b, b'a'..=b'z' | b'0'..=b'9' | b'_' | b'-') {
+                panic_with_error!(env, RegistryError::InvalidUsernameChars);
+            }
+        }
+    }
+
     fn contains_address(vec: &Vec<Address>, target: &Address) -> bool {
         for i in 0..vec.len() {
             if vec.get(i).unwrap() == *target {
@@ -433,19 +502,40 @@ impl CreatorRegistryContract {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use soroban_sdk::testutils::{Address as _, Ledger};
+    use common::{INSTANCE_BUMP_AMOUNT, INSTANCE_LIFETIME_THRESHOLD};
+    use soroban_sdk::testutils::{storage::Instance as _, Address as _, Ledger};
+    use soroban_sdk::{vec, IntoVal, Val};
+
+    /// Deploys a 1-of-1 registry whose authorized donation contract is a
+    /// generated address. Returns (client, admin, donation_contract).
+    fn setup(env: &Env) -> (CreatorRegistryContractClient<'_>, Address, Address) {
+        let admin = Address::generate(env);
+        let donation_contract = Address::generate(env);
+        let contract_id = env.register(
+            CreatorRegistryContract,
+            (vec![env, admin.clone()], 1u32, 0u64, donation_contract.clone()),
+        );
+        (
+            CreatorRegistryContractClient::new(env, &contract_id),
+            admin,
+            donation_contract,
+        )
+    }
+
+    fn s(env: &Env, value: &str) -> String {
+        String::from_str(env, value)
+    }
 
     #[test]
     fn test_register_creator() {
         let env = Env::default();
         env.mock_all_auths();
-        let contract_id = env.register(CreatorRegistryContract, ());
-        let client = CreatorRegistryContractClient::new(&env, &contract_id);
+        let (client, _, _) = setup(&env);
 
         let creator = Address::generate(&env);
         env.ledger().with_mut(|li| li.sequence_number = 100);
 
-        let profile = client.register_creator(&creator, &String::from_bytes(&env, b"awesome_dev"));
+        let profile = client.register_creator(&creator, &s(&env, "awesome_dev"));
 
         assert_eq!(profile.donation_count, 0);
         assert_eq!(profile.total_donations, 0);
@@ -456,33 +546,111 @@ mod tests {
     fn test_register_creator_twice_panics() {
         let env = Env::default();
         env.mock_all_auths();
-        let contract_id = env.register(CreatorRegistryContract, ());
-        let client = CreatorRegistryContractClient::new(&env, &contract_id);
+        let (client, _, _) = setup(&env);
 
         let creator = Address::generate(&env);
-        let username = String::from_bytes(&env, b"awesome_dev");
-        client.register_creator(&creator, &username);
-        client.register_creator(&creator, &username);
+        client.register_creator(&creator, &s(&env, "awesome_dev"));
+        client.register_creator(&creator, &s(&env, "another_name"));
+    }
+
+    #[test]
+    fn test_register_creator_rejects_empty_username() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let (client, _, _) = setup(&env);
+
+        let creator = Address::generate(&env);
+        assert_eq!(
+            client.try_register_creator(&creator, &s(&env, "")),
+            Err(Ok(RegistryError::EmptyUsername.into()))
+        );
+        assert!(client.get_creator(&creator).is_none());
+    }
+
+    #[test]
+    fn test_register_creator_rejects_too_long_username() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let (client, _, _) = setup(&env);
+
+        let creator = Address::generate(&env);
+        let max = s(&env, "abcdefghijklmnopqrstuvwxyz012345");
+        let too_long = s(&env, "abcdefghijklmnopqrstuvwxyz0123456");
+        assert_eq!(max.len(), MAX_USERNAME_LENGTH);
+
+        assert_eq!(
+            client.try_register_creator(&creator, &too_long),
+            Err(Ok(RegistryError::UsernameTooLong.into()))
+        );
+        client.register_creator(&creator, &max);
+    }
+
+    #[test]
+    fn test_register_creator_rejects_invalid_charset() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let (client, _, _) = setup(&env);
+
+        let creator = Address::generate(&env);
+        for bad in ["Alice", "a b", "dev!", "dev.eth", "émile", "a/b"] {
+            assert_eq!(
+                client.try_register_creator(&creator, &s(&env, bad)),
+                Err(Ok(RegistryError::InvalidUsernameChars.into())),
+                "{bad} should be rejected"
+            );
+        }
+        client.register_creator(&creator, &s(&env, "dev_2-ok"));
+    }
+
+    #[test]
+    fn test_register_creator_rejects_duplicate_username() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let (client, _, _) = setup(&env);
+
+        let alice = Address::generate(&env);
+        let mallory = Address::generate(&env);
+        client.register_creator(&alice, &s(&env, "alice"));
+
+        assert_eq!(
+            client.try_register_creator(&mallory, &s(&env, "alice")),
+            Err(Ok(RegistryError::UsernameTaken.into()))
+        );
+        assert!(client.get_creator(&mallory).is_none());
+        assert_eq!(
+            client.get_creator_by_username(&s(&env, "alice")).unwrap().address,
+            alice
+        );
+    }
+
+    #[test]
+    fn test_get_creator_by_username() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let (client, _, _) = setup(&env);
+
+        let creator = Address::generate(&env);
+        assert!(client.get_creator_by_username(&s(&env, "dev")).is_none());
+
+        client.register_creator(&creator, &s(&env, "dev"));
+        let profile = client.get_creator_by_username(&s(&env, "dev")).unwrap();
+        assert_eq!(profile.address, creator);
+        assert_eq!(profile.username, s(&env, "dev"));
     }
 
     #[test]
     fn test_record_donation_updates_stats() {
         let env = Env::default();
         env.mock_all_auths();
-        let contract_id = env.register(CreatorRegistryContract, ());
-        let client = CreatorRegistryContractClient::new(&env, &contract_id);
-
-        let admin = Address::generate(&env);
-        let donation_contract = Address::generate(&env);
+        let (client, _, donation_contract) = setup(&env);
         let creator = Address::generate(&env);
 
-        client.initialize(&admin, &donation_contract);
         client.record_donation(&donation_contract, &creator, &1000);
         client.record_donation(&donation_contract, &creator, &500);
 
         assert!(client.get_creator(&creator).is_none());
 
-        client.register_creator(&creator, &String::from_bytes(&env, b"dev"));
+        client.register_creator(&creator, &s(&env, "dev"));
         let profile = client.get_creator(&creator).unwrap();
         assert_eq!(profile.total_donations, 1500);
         assert_eq!(profile.donation_count, 2);
@@ -493,31 +661,75 @@ mod tests {
     fn test_record_donation_rejects_unauthorized_caller() {
         let env = Env::default();
         env.mock_all_auths();
-        let contract_id = env.register(CreatorRegistryContract, ());
-        let client = CreatorRegistryContractClient::new(&env, &contract_id);
+        let (client, _, _) = setup(&env);
 
-        let admin = Address::generate(&env);
-        let donation_contract = Address::generate(&env);
         let impostor = Address::generate(&env);
         let creator = Address::generate(&env);
-
-        client.initialize(&admin, &donation_contract);
         client.record_donation(&impostor, &creator, &1000);
     }
 
     #[test]
-    #[should_panic(expected = "registry already initialized")]
-    fn test_initialize_twice_panics() {
+    fn test_constructor_sets_admins_atomically() {
+        let env = Env::default();
+        let (client, admin, _) = setup(&env);
+        assert!(client.is_admin(&admin));
+        assert!(!client.is_admin(&Address::generate(&env)));
+    }
+
+    #[test]
+    #[should_panic(expected = "invalid signature threshold")]
+    fn test_constructor_rejects_threshold_above_admin_count() {
+        let env = Env::default();
+        let admin = Address::generate(&env);
+        env.register(
+            CreatorRegistryContract,
+            (vec![&env, admin], 2u32, 0u64, Address::generate(&env)),
+        );
+    }
+
+    #[test]
+    #[should_panic(expected = "duplicate admin in admin list")]
+    fn test_constructor_rejects_duplicate_admins() {
+        let env = Env::default();
+        let admin = Address::generate(&env);
+        env.register(
+            CreatorRegistryContract,
+            (vec![&env, admin.clone(), admin], 2u32, 0u64, Address::generate(&env)),
+        );
+    }
+
+    #[test]
+    fn test_no_init_entry_point_callable_after_deploy() {
         let env = Env::default();
         env.mock_all_auths();
-        let contract_id = env.register(CreatorRegistryContract, ());
-        let client = CreatorRegistryContractClient::new(&env, &contract_id);
+        let (client, admin, _) = setup(&env);
 
-        let admin = Address::generate(&env);
-        let donation_contract = Address::generate(&env);
+        let attacker = Address::generate(&env);
+        let attacker_donation = Address::generate(&env);
+        let attacker_admins = vec![&env, attacker.clone()];
 
-        client.initialize(&admin, &donation_contract);
-        client.initialize(&admin, &donation_contract);
+        let attempts: [(&str, Vec<Val>); 3] = [
+            ("initialize", (attacker.clone(), attacker_donation.clone()).into_val(&env)),
+            (
+                "initialize_multisig",
+                (attacker_admins.clone(), 1u32, 0u64, attacker_donation.clone()).into_val(&env),
+            ),
+            (
+                "__constructor",
+                (attacker_admins, 1u32, 0u64, attacker_donation.clone()).into_val(&env),
+            ),
+        ];
+        for (name, args) in attempts {
+            let res = env.try_invoke_contract::<Val, soroban_sdk::Error>(
+                &client.address,
+                &Symbol::new(&env, name),
+                args,
+            );
+            assert!(res.is_err(), "{name} must not be callable after deploy");
+        }
+
+        assert!(client.is_admin(&admin));
+        assert!(!client.is_admin(&attacker));
     }
 
     #[test]
@@ -525,19 +737,16 @@ mod tests {
         let env = Env::default();
         env.mock_all_auths();
 
-        let contract_id = env.register(CreatorRegistryContract, ());
-        let client = CreatorRegistryContractClient::new(&env, &contract_id);
-
         let admin1 = Address::generate(&env);
         let admin2 = Address::generate(&env);
-        let mut admins = Vec::new(&env);
-        admins.push_back(admin1.clone());
-        admins.push_back(admin2.clone());
-
         let initial_donation = Address::generate(&env);
         let new_donation = Address::generate(&env);
 
-        client.initialize_multisig(&admins, &2, &50, &initial_donation);
+        let contract_id = env.register(
+            CreatorRegistryContract,
+            (vec![&env, admin1.clone(), admin2.clone()], 2u32, 50u64, initial_donation),
+        );
+        let client = CreatorRegistryContractClient::new(&env, &contract_id);
 
         let prop_id = client.propose_admin_action(
             &admin1,
@@ -557,35 +766,79 @@ mod tests {
 
         let prop_after = client.get_proposal(&prop_id).unwrap();
         assert_eq!(prop_after.executed, true);
+
+        // The new donation contract is now the only authorized recorder.
+        client.record_donation(&new_donation, &Address::generate(&env), &10);
+    }
+
+    #[test]
+    fn test_propose_unsupported_actions_rejected() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let (client, admin, _) = setup(&env);
+
+        for action in [
+            AdminAction::Pause,
+            AdminAction::Unpause,
+            AdminAction::SetExecutor(Address::generate(&env)),
+        ] {
+            assert_eq!(
+                client.try_propose_admin_action(&admin, &action),
+                Err(Ok(RegistryError::UnsupportedAction.into()))
+            );
+        }
+        assert!(client.get_proposal(&0).is_none());
+    }
+
+    #[test]
+    fn test_execute_refuses_stored_unsupported_action() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let (client, admin, _) = setup(&env);
+
+        // Simulate a Pause proposal persisted before proposal-time validation
+        // existed: execution must fail instead of marking it executed.
+        env.as_contract(&client.address, || {
+            let proposal = AdminProposal {
+                id: 0,
+                action: AdminAction::Pause,
+                proposer: admin.clone(),
+                approvals_count: 1,
+                created_at: 0,
+                eta: 0,
+                executed: false,
+            };
+            env.storage().persistent().set(&(PROPOSAL_KEY, 0u64), &proposal);
+        });
+
+        assert_eq!(
+            client.try_execute_admin_action(&admin, &0),
+            Err(Ok(RegistryError::UnsupportedAction.into()))
+        );
+        assert!(!client.get_proposal(&0).unwrap().executed);
     }
 
     #[test]
     fn test_register_creator_after_donation() {
         let env = Env::default();
         env.mock_all_auths();
-        let contract_id = env.register(CreatorRegistryContract, ());
-        let client = CreatorRegistryContractClient::new(&env, &contract_id);
-
-        let admin = Address::generate(&env);
-        let donation_contract = Address::generate(&env);
+        let (client, _, donation_contract) = setup(&env);
         let creator = Address::generate(&env);
 
-        client.initialize(&admin, &donation_contract);
-        
         // Donation comes first, creating a placeholder profile
         client.record_donation(&donation_contract, &creator, &1000);
 
         assert!(client.get_creator(&creator).is_none());
 
         // Now the creator registers
-        let profile = client.register_creator(&creator, &String::from_bytes(&env, b"late_dev"));
+        let profile = client.register_creator(&creator, &s(&env, "late_dev"));
 
-        assert_eq!(profile.username, String::from_bytes(&env, b"late_dev"));
+        assert_eq!(profile.username, s(&env, "late_dev"));
         assert_eq!(profile.total_donations, 1000);
         assert_eq!(profile.donation_count, 1);
-        
+
         let fetched = client.get_creator(&creator).unwrap();
-        assert_eq!(fetched.username, String::from_bytes(&env, b"late_dev"));
+        assert_eq!(fetched.username, s(&env, "late_dev"));
         assert_eq!(fetched.total_donations, 1000);
     }
 
@@ -594,15 +847,54 @@ mod tests {
     fn test_record_donation_total_overflow_panics() {
         let env = Env::default();
         env.mock_all_auths();
-        let contract_id = env.register(CreatorRegistryContract, ());
-        let client = CreatorRegistryContractClient::new(&env, &contract_id);
-
-        let admin = Address::generate(&env);
-        let donation_contract = Address::generate(&env);
+        let (client, _, donation_contract) = setup(&env);
         let creator = Address::generate(&env);
 
-        client.initialize(&admin, &donation_contract);
         client.record_donation(&donation_contract, &creator, &i128::MAX);
         client.record_donation(&donation_contract, &creator, &1);
+    }
+
+    fn instance_ttl(env: &Env, contract: &Address) -> u32 {
+        env.as_contract(contract, || env.storage().instance().get_ttl())
+    }
+
+    #[test]
+    fn test_instance_ttl_survives_past_default_ttl_with_usage() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let (client, _, donation_contract) = setup(&env);
+        let creator = Address::generate(&env);
+
+        assert!(instance_ttl(&env, &client.address) >= INSTANCE_LIFETIME_THRESHOLD);
+
+        // Advance well beyond the default instance TTL (and two full bump
+        // periods) in steps, using the contract in between. The test host does
+        // not reject reads of archived entries, so liveness is asserted via the
+        // remaining TTL after each step.
+        let default_ttl = env.ledger().get().min_persistent_entry_ttl;
+        let step = default_ttl.max(INSTANCE_BUMP_AMOUNT - INSTANCE_LIFETIME_THRESHOLD + 1);
+        for _ in 0..(2 * INSTANCE_BUMP_AMOUNT / step + 1) {
+            env.ledger().with_mut(|li| li.sequence_number += step);
+            client.record_donation(&donation_contract, &creator, &1);
+            assert!(instance_ttl(&env, &client.address) >= INSTANCE_LIFETIME_THRESHOLD);
+        }
+
+        // Instance (and its config) is still live and readable.
+        client.register_creator(&creator, &s(&env, "still_live"));
+        assert!(client.get_creator(&creator).unwrap().donation_count > 1);
+    }
+
+    #[test]
+    fn test_bump_extends_instance_ttl() {
+        let env = Env::default();
+        let (client, admin, _) = setup(&env);
+
+        env.ledger()
+            .with_mut(|li| li.sequence_number += INSTANCE_BUMP_AMOUNT - 2 * common::DAY_IN_LEDGERS);
+        assert!(instance_ttl(&env, &client.address) < INSTANCE_LIFETIME_THRESHOLD);
+
+        client.bump();
+        assert_eq!(instance_ttl(&env, &client.address), INSTANCE_BUMP_AMOUNT);
+        assert!(client.is_admin(&admin));
     }
 }
