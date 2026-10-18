@@ -25,11 +25,12 @@
 //! crate docs for the TTL constants.
 
 use common::{
-    extend_instance_ttl, validate_admin_set, AdminAction, AdminProposal, CreatorProfile,
+    extend_instance_ttl, extend_persistent_ttl, validate_admin_set, AdminAction, AdminProposal,
+    CreatorProfile,
 };
 use soroban_sdk::{
-    contract, contracterror, contractevent, contractimpl, panic_with_error, symbol_short,
-    Address, Env, String, Symbol, Vec,
+    contract, contracterror, contractevent, contractimpl, panic_with_error, symbol_short, Address,
+    Env, String, Symbol, Vec,
 };
 
 const ADMIN_KEY: Symbol = symbol_short!("admin");
@@ -136,8 +137,12 @@ impl CreatorRegistryContract {
         env.storage().instance().set(&ADMIN_KEY, &primary_admin);
         env.storage().instance().set(&ADMINS_KEY, &admins);
         env.storage().instance().set(&THRESHOLD_KEY, &threshold);
-        env.storage().instance().set(&TIMELOCK_DELAY_KEY, &timelock_delay);
-        env.storage().instance().set(&DONATION_KEY, &donation_contract);
+        env.storage()
+            .instance()
+            .set(&TIMELOCK_DELAY_KEY, &timelock_delay);
+        env.storage()
+            .instance()
+            .set(&DONATION_KEY, &donation_contract);
         extend_instance_ttl(&env);
     }
 
@@ -165,7 +170,10 @@ impl CreatorRegistryContract {
     /// Proposes a multi-signature administrative action.
     pub fn propose_admin_action(env: Env, proposer: Address, action: AdminAction) -> u64 {
         proposer.require_auth();
-        assert!(Self::is_admin(env.clone(), proposer.clone()), "proposer is not an admin");
+        assert!(
+            Self::is_admin(env.clone(), proposer.clone()),
+            "proposer is not an admin"
+        );
         if !Self::is_supported_action(&action) {
             panic_with_error!(&env, RegistryError::UnsupportedAction);
         }
@@ -283,7 +291,10 @@ impl CreatorRegistryContract {
         );
 
         let now = env.ledger().timestamp();
-        assert!(now >= proposal.eta, "proposal timelock delay has not elapsed");
+        assert!(
+            now >= proposal.eta,
+            "proposal timelock delay has not elapsed"
+        );
         extend_instance_ttl(&env);
 
         match proposal.action.clone() {
@@ -352,7 +363,9 @@ impl CreatorRegistryContract {
                 .get(&ADMIN_KEY)
                 .expect("registry not initialized");
             admin.require_auth();
-            env.storage().instance().set(&DONATION_KEY, &donation_contract);
+            env.storage()
+                .instance()
+                .set(&DONATION_KEY, &donation_contract);
             extend_instance_ttl(&env);
         } else {
             panic!("multi-sig required: use propose_admin_action to set donation contract");
@@ -371,7 +384,11 @@ impl CreatorRegistryContract {
         }
         extend_instance_ttl(&env);
 
-        let profile = if let Some(p) = env.storage().persistent().get::<_, CreatorProfile>(&creator) {
+        let profile = if let Some(p) = env
+            .storage()
+            .persistent()
+            .get::<_, CreatorProfile>(&creator)
+        {
             // If the profile exists, it must be a placeholder created by record_donation
             assert!(p.username.is_empty(), "creator already registered");
             CreatorProfile {
@@ -393,6 +410,8 @@ impl CreatorRegistryContract {
 
         env.storage().persistent().set(&creator, &profile);
         env.storage().persistent().set(&username_key, &creator);
+        extend_persistent_ttl(&env, &creator);
+        extend_persistent_ttl(&env, &username_key);
         CreatedEvent { creator, username }.publish(&env);
 
         profile
@@ -457,6 +476,11 @@ impl CreatorRegistryContract {
             .expect("donation count overflow");
 
         env.storage().persistent().set(&creator, &profile);
+        // The profile is the sole on-chain source of a creator's lifetime
+        // totals: renew it (and the username index and goal that belong to
+        // it) on every read-modify-write so an inactive creator's history is
+        // never silently reset to a fresh placeholder.
+        Self::extend_creator_entries(&env, &creator, &profile);
 
         // Emit event with full payload so downstream backends/indexers can
         // reconcile lifetime statistics without extra RPC calls.
@@ -478,6 +502,7 @@ impl CreatorRegistryContract {
         env.storage()
             .persistent()
             .set(&(GOAL_KEY, creator.clone()), &goal_amount);
+        extend_persistent_ttl(&env, &(GOAL_KEY, creator.clone()));
 
         GoalUpdatedEvent {
             creator,
@@ -487,9 +512,38 @@ impl CreatorRegistryContract {
         .publish(&env);
     }
 
+    /// Permissionless keep-alive for a creator's persistent entries (profile,
+    /// username index and goal). Intended to be called on a schedule by the
+    /// backend for creators with no recent activity. It only extends TTLs, and
+    /// only once they drop below the threshold, so repeated calls are cheap
+    /// and cannot be used to grief the contract. A no-op for unknown creators.
+    pub fn bump_creator(env: Env, creator: Address) {
+        extend_instance_ttl(&env);
+        if let Some(profile) = env
+            .storage()
+            .persistent()
+            .get::<_, CreatorProfile>(&creator)
+        {
+            Self::extend_creator_entries(&env, &creator, &profile);
+        }
+    }
+
     /// Reads a creator's funding goal, if set.
     pub fn get_goal(env: Env, creator: Address) -> Option<i128> {
         env.storage().persistent().get(&(GOAL_KEY, creator))
+    }
+
+    /// Extends the TTL of a creator's profile, its username index entry (when
+    /// registered) and its goal (when set).
+    fn extend_creator_entries(env: &Env, creator: &Address, profile: &CreatorProfile) {
+        extend_persistent_ttl(env, creator);
+        if !profile.username.is_empty() {
+            extend_persistent_ttl(env, &(USERNAME_KEY, profile.username.clone()));
+        }
+        let goal_key = (GOAL_KEY, creator.clone());
+        if env.storage().persistent().has(&goal_key) {
+            extend_persistent_ttl(env, &goal_key);
+        }
     }
 
     /// Whether `action` has an effect on the registry. Exhaustive on purpose:
@@ -535,8 +589,14 @@ impl CreatorRegistryContract {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use common::{INSTANCE_BUMP_AMOUNT, INSTANCE_LIFETIME_THRESHOLD};
-    use soroban_sdk::testutils::{storage::Instance as _, Address as _, Ledger};
+    use common::{
+        INSTANCE_BUMP_AMOUNT, INSTANCE_LIFETIME_THRESHOLD, PERSISTENT_BUMP_AMOUNT,
+        PERSISTENT_LIFETIME_THRESHOLD,
+    };
+    use soroban_sdk::testutils::{
+        storage::{Instance as _, Persistent as _},
+        Address as _, Ledger,
+    };
     use soroban_sdk::{vec, IntoVal, Val};
 
     /// Deploys a 1-of-1 registry whose authorized donation contract is a
@@ -546,7 +606,12 @@ mod tests {
         let donation_contract = Address::generate(env);
         let contract_id = env.register(
             CreatorRegistryContract,
-            (vec![env, admin.clone()], 1u32, 0u64, donation_contract.clone()),
+            (
+                vec![env, admin.clone()],
+                1u32,
+                0u64,
+                donation_contract.clone(),
+            ),
         );
         (
             CreatorRegistryContractClient::new(env, &contract_id),
@@ -651,7 +716,10 @@ mod tests {
         );
         assert!(client.get_creator(&mallory).is_none());
         assert_eq!(
-            client.get_creator_by_username(&s(&env, "alice")).unwrap().address,
+            client
+                .get_creator_by_username(&s(&env, "alice"))
+                .unwrap()
+                .address,
             alice
         );
     }
@@ -727,7 +795,12 @@ mod tests {
         let admin = Address::generate(&env);
         env.register(
             CreatorRegistryContract,
-            (vec![&env, admin.clone(), admin], 2u32, 0u64, Address::generate(&env)),
+            (
+                vec![&env, admin.clone(), admin],
+                2u32,
+                0u64,
+                Address::generate(&env),
+            ),
         );
     }
 
@@ -742,10 +815,19 @@ mod tests {
         let attacker_admins = vec![&env, attacker.clone()];
 
         let attempts: [(&str, Vec<Val>); 3] = [
-            ("initialize", (attacker.clone(), attacker_donation.clone()).into_val(&env)),
+            (
+                "initialize",
+                (attacker.clone(), attacker_donation.clone()).into_val(&env),
+            ),
             (
                 "initialize_multisig",
-                (attacker_admins.clone(), 1u32, 0u64, attacker_donation.clone()).into_val(&env),
+                (
+                    attacker_admins.clone(),
+                    1u32,
+                    0u64,
+                    attacker_donation.clone(),
+                )
+                    .into_val(&env),
             ),
             (
                 "__constructor",
@@ -777,7 +859,12 @@ mod tests {
 
         let contract_id = env.register(
             CreatorRegistryContract,
-            (vec![&env, admin1.clone(), admin2.clone()], 2u32, 50u64, initial_donation),
+            (
+                vec![&env, admin1.clone(), admin2.clone()],
+                2u32,
+                50u64,
+                initial_donation,
+            ),
         );
         let client = CreatorRegistryContractClient::new(&env, &contract_id);
 
@@ -798,7 +885,7 @@ mod tests {
         client.execute_admin_action(&admin1, &prop_id);
 
         let prop_after = client.get_proposal(&prop_id).unwrap();
-        assert_eq!(prop_after.executed, true);
+        assert!(prop_after.executed);
 
         // The new donation contract is now the only authorized recorder.
         client.record_donation(&new_donation, &Address::generate(&env), &10);
@@ -841,7 +928,9 @@ mod tests {
                 eta: 0,
                 executed: false,
             };
-            env.storage().persistent().set(&(PROPOSAL_KEY, 0u64), &proposal);
+            env.storage()
+                .persistent()
+                .set(&(PROPOSAL_KEY, 0u64), &proposal);
         });
 
         assert_eq!(
@@ -929,5 +1018,182 @@ mod tests {
         client.bump();
         assert_eq!(instance_ttl(&env, &client.address), INSTANCE_BUMP_AMOUNT);
         assert!(client.is_admin(&admin));
+    }
+
+    // ------------------------------------------------------------------
+    // Persistent entry TTLs (#215)
+    // ------------------------------------------------------------------
+
+    fn persistent_ttl<K: IntoVal<Env, Val>>(env: &Env, contract: &Address, key: &K) -> u32 {
+        env.as_contract(contract, || env.storage().persistent().get_ttl(key))
+    }
+
+    /// Ledgers to advance so a freshly extended persistent entry drops just
+    /// below the extension threshold.
+    const DECAY: u32 = PERSISTENT_BUMP_AMOUNT - PERSISTENT_LIFETIME_THRESHOLD + 1;
+
+    #[test]
+    fn test_register_creator_extends_profile_and_username_ttl() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let (client, _, _) = setup(&env);
+        let creator = Address::generate(&env);
+
+        client.register_creator(&creator, &s(&env, "ttl_user"));
+
+        let username_key = (USERNAME_KEY, s(&env, "ttl_user"));
+        assert_eq!(
+            persistent_ttl(&env, &client.address, &creator),
+            PERSISTENT_BUMP_AMOUNT
+        );
+        assert_eq!(
+            persistent_ttl(&env, &client.address, &username_key),
+            PERSISTENT_BUMP_AMOUNT
+        );
+    }
+
+    #[test]
+    fn test_record_donation_keeps_profile_history_alive_past_original_ttl() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let (client, _, donation_contract) = setup(&env);
+        let creator = Address::generate(&env);
+        client.register_creator(&creator, &s(&env, "long_lived"));
+        let username_key = (USERNAME_KEY, s(&env, "long_lived"));
+
+        // Active just often enough to need a renewal each time, for far longer
+        // than the original TTL. The test host does not reject reads of
+        // archived entries, so liveness is asserted via the remaining TTL.
+        let rounds = 2 * PERSISTENT_BUMP_AMOUNT / DECAY + 1;
+        for _ in 0..rounds {
+            env.ledger().with_mut(|li| li.sequence_number += DECAY);
+            assert!(
+                persistent_ttl(&env, &client.address, &creator) < PERSISTENT_LIFETIME_THRESHOLD
+            );
+            client.record_donation(&donation_contract, &creator, &10);
+            assert_eq!(
+                persistent_ttl(&env, &client.address, &creator),
+                PERSISTENT_BUMP_AMOUNT
+            );
+            assert_eq!(
+                persistent_ttl(&env, &client.address, &username_key),
+                PERSISTENT_BUMP_AMOUNT
+            );
+        }
+
+        // Total elapsed time is well past the original TTL, and nothing was reset.
+        assert!(rounds * DECAY > PERSISTENT_BUMP_AMOUNT);
+        let profile = client.get_creator(&creator).unwrap();
+        assert_eq!(profile.username, s(&env, "long_lived"));
+        assert_eq!(profile.donation_count, rounds);
+        assert_eq!(profile.total_donations, 10 * rounds as i128);
+        assert_eq!(
+            client.get_creator_by_username(&s(&env, "long_lived")),
+            Some(profile)
+        );
+    }
+
+    #[test]
+    fn test_record_donation_extends_placeholder_profile() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let (client, _, donation_contract) = setup(&env);
+        let creator = Address::generate(&env);
+
+        client.record_donation(&donation_contract, &creator, &5);
+
+        assert_eq!(
+            persistent_ttl(&env, &client.address, &creator),
+            PERSISTENT_BUMP_AMOUNT
+        );
+    }
+
+    #[test]
+    fn test_record_donation_also_renews_goal() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let (client, _, donation_contract) = setup(&env);
+        let creator = Address::generate(&env);
+        client.set_goal(&creator, &1_000);
+        let goal_key = (GOAL_KEY, creator.clone());
+        assert_eq!(
+            persistent_ttl(&env, &client.address, &goal_key),
+            PERSISTENT_BUMP_AMOUNT
+        );
+
+        env.ledger().with_mut(|li| li.sequence_number += DECAY);
+        assert!(persistent_ttl(&env, &client.address, &goal_key) < PERSISTENT_LIFETIME_THRESHOLD);
+        client.record_donation(&donation_contract, &creator, &5);
+
+        assert_eq!(
+            persistent_ttl(&env, &client.address, &goal_key),
+            PERSISTENT_BUMP_AMOUNT
+        );
+        assert_eq!(client.get_goal(&creator), Some(1_000));
+    }
+
+    #[test]
+    fn test_set_goal_extends_goal_ttl() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let (client, _, _) = setup(&env);
+        let creator = Address::generate(&env);
+        let goal_key = (GOAL_KEY, creator.clone());
+
+        client.set_goal(&creator, &500);
+        env.ledger().with_mut(|li| li.sequence_number += DECAY);
+        assert!(persistent_ttl(&env, &client.address, &goal_key) < PERSISTENT_LIFETIME_THRESHOLD);
+
+        client.set_goal(&creator, &750);
+        assert_eq!(
+            persistent_ttl(&env, &client.address, &goal_key),
+            PERSISTENT_BUMP_AMOUNT
+        );
+    }
+
+    #[test]
+    fn test_bump_creator_extends_idle_profile_without_changing_it() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let (client, _, donation_contract) = setup(&env);
+        let creator = Address::generate(&env);
+        client.register_creator(&creator, &s(&env, "idle"));
+        client.record_donation(&donation_contract, &creator, &42);
+        client.set_goal(&creator, &9_000);
+        let before = client.get_creator(&creator).unwrap();
+
+        env.ledger().with_mut(|li| li.sequence_number += DECAY);
+        let username_key = (USERNAME_KEY, s(&env, "idle"));
+        let goal_key = (GOAL_KEY, creator.clone());
+        assert!(persistent_ttl(&env, &client.address, &creator) < PERSISTENT_LIFETIME_THRESHOLD);
+
+        // Permissionless: no auth is mocked for the keeper.
+        client.bump_creator(&creator);
+
+        assert_eq!(
+            persistent_ttl(&env, &client.address, &creator),
+            PERSISTENT_BUMP_AMOUNT
+        );
+        assert_eq!(
+            persistent_ttl(&env, &client.address, &username_key),
+            PERSISTENT_BUMP_AMOUNT
+        );
+        assert_eq!(
+            persistent_ttl(&env, &client.address, &goal_key),
+            PERSISTENT_BUMP_AMOUNT
+        );
+        assert_eq!(client.get_creator(&creator).unwrap(), before);
+        assert_eq!(client.get_goal(&creator), Some(9_000));
+    }
+
+    #[test]
+    fn test_bump_creator_is_a_noop_for_unknown_creators() {
+        let env = Env::default();
+        let (client, _, _) = setup(&env);
+        let stranger = Address::generate(&env);
+
+        client.bump_creator(&stranger);
+
+        assert_eq!(client.get_creator(&stranger), None);
     }
 }

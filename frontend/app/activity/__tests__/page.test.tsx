@@ -28,25 +28,12 @@ const emptyOverview = {
   totalSignups: 0,
   totalCreators: 0,
   earningsByCurrency: {},
-  users: [],
-  pagination: { page: 1, limit: 10, total: 0, totalPages: 0 },
 };
 
 const populatedOverview = {
   totalSignups: 2,
   totalCreators: 1,
   earningsByCurrency: { XLM: 42 },
-  users: [
-    {
-      id: 1,
-      walletAddress: 'GALICE1234567890',
-      joinedAt: '2026-01-01T00:00:00.000Z',
-      username: 'alice',
-      displayName: 'Alice',
-      earningsByCurrency: { XLM: 42 },
-    },
-  ],
-  pagination: { page: 1, limit: 10, total: 1, totalPages: 1 },
 };
 
 describe('ActivityPage', () => {
@@ -74,24 +61,74 @@ describe('ActivityPage', () => {
 
     await waitFor(() => expect(screen.getByText('No activity yet')).toBeInTheDocument());
 
-    // No zeroed stat cards or an empty table — just the encouraging copy and CTA.
+    // No zeroed stat cards — just the encouraging copy and CTA.
     expect(screen.queryByText('Sign-ups')).not.toBeInTheDocument();
-    expect(screen.queryByText('No users yet.')).not.toBeInTheDocument();
 
     const cta = screen.getByRole('link', { name: /create your page/i });
     expect(cta).toBeInTheDocument();
     expect(cta).toHaveAttribute('href', '/auth/username');
   });
 
-  it('renders headline stats and the users table once there is real activity', async () => {
+  it('states what the page is for and what the numbers mean', async () => {
     vi.mocked(fetch).mockResolvedValue(jsonResponse(populatedOverview));
 
     render(<ActivityPage />);
 
     await waitFor(() => expect(screen.getByText('Sign-ups')).toBeInTheDocument());
 
-    expect(screen.getByText('Users (1)')).toBeInTheDocument();
-    expect(screen.getByText('Alice')).toBeInTheDocument();
+    expect(screen.getByRole('heading', { name: 'Community Activity' })).toBeInTheDocument();
+    expect(screen.getByText(/aggregated across all accounts/i)).toBeInTheDocument();
+    expect(screen.getByText(/never listed here/i)).toBeInTheDocument();
+    expect(screen.getByText('Accounts created on SupportMe')).toBeInTheDocument();
+    expect(screen.getByText('Accounts with a creator page')).toBeInTheDocument();
+  });
+
+  it('renders aggregate headline stats only', async () => {
+    vi.mocked(fetch).mockResolvedValue(jsonResponse(populatedOverview));
+
+    render(<ActivityPage />);
+
+    await waitFor(() => expect(screen.getByText('Sign-ups')).toBeInTheDocument());
+
+    expect(await screen.findByText('42.00')).toBeInTheDocument();
     expect(screen.queryByText('No activity yet')).not.toBeInTheDocument();
+  });
+
+  it('never renders per-user rows, names, wallets or earnings, even if the API returns them', async () => {
+    vi.mocked(fetch).mockResolvedValue(
+      jsonResponse({
+        ...populatedOverview,
+        // A stale or misbehaving API must not make the page expose people.
+        users: [
+          {
+            id: 1,
+            walletAddress: 'GALICE1234567890',
+            joinedAt: '2026-01-01T00:00:00.000Z',
+            username: 'alice',
+            displayName: 'Alice',
+            earningsByCurrency: { XLM: 42 },
+          },
+        ],
+      }),
+    );
+
+    const { container } = render(<ActivityPage />);
+
+    await waitFor(() => expect(screen.getByText('Sign-ups')).toBeInTheDocument());
+
+    expect(container.querySelector('table')).not.toBeInTheDocument();
+    expect(screen.queryByText('Alice')).not.toBeInTheDocument();
+    expect(screen.queryByText(/GALICE/)).not.toBeInTheDocument();
+    expect(screen.queryByText(/Users \(/)).not.toBeInTheDocument();
+  });
+
+  it('requests the overview without a pagination parameter', async () => {
+    vi.mocked(fetch).mockResolvedValue(jsonResponse(populatedOverview));
+
+    render(<ActivityPage />);
+
+    await waitFor(() => expect(screen.getByText('Sign-ups')).toBeInTheDocument());
+    const url = String(vi.mocked(fetch).mock.calls[0][0]);
+    expect(url).toMatch(/\/api\/activity\/overview$/);
   });
 });

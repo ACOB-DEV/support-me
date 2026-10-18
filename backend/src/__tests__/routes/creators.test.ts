@@ -4,6 +4,7 @@ jest.mock("../../prisma", () => ({
     creator: {
       findMany: jest.fn(),
       findUnique: jest.fn(),
+      findFirst: jest.fn(),
       create: jest.fn(),
       update: jest.fn(),
       count: jest.fn(),
@@ -20,11 +21,14 @@ import app from "../../app";
 import prisma from "../../prisma";
 import { generateToken } from "../../middleware/auth";
 import { leaderboardCache } from "../../routes/creators";
+import { challenges } from "../../routes/auth";
+import { Keypair } from "@stellar/stellar-sdk";
 
 const mockedPrisma = prisma as unknown as {
   creator: {
     findMany: jest.Mock;
     findUnique: jest.Mock;
+    findFirst: jest.Mock;
     create: jest.Mock;
     update: jest.Mock;
     count: jest.Mock;
@@ -137,8 +141,21 @@ describe("GET /api/creators/:username", () => {
   });
 });
 
+// Signs the message for `keypair` the way a wallet's signMessage does, after
+// registering the challenge the real /api/auth/challenge endpoint would issue.
+function proveWallet(keypair: Keypair): string {
+  const message = `Sign in to SupportMe\n\nAddress: ${keypair.publicKey()}\nNonce: test-nonce\nIssued At: now`;
+  challenges.set(keypair.publicKey(), { message, expiresAt: Date.now() + 60_000 });
+  const { createHash } = jest.requireActual("crypto") as typeof import("crypto");
+  const hash = createHash("sha256")
+    .update(Buffer.concat([Buffer.from("Stellar Signed Message:\n"), Buffer.from(message)]))
+    .digest();
+  return keypair.sign(hash).toString("base64");
+}
+
 describe("POST /api/creators/:username/create", () => {
-  const token = generateToken(1, "GUSERADDRESS");
+  const OWN_WALLET = "GA7D5LDGFABXNYEO6LZVMTWK5JWEPTODCLYZ7TG4XDZRKKXP6OS5K5JW";
+  const token = generateToken(1, OWN_WALLET);
 
   it("rejects requests without an auth token", async () => {
     const res = await request(app).post("/api/creators/bob/create").send({});
@@ -183,12 +200,12 @@ describe("POST /api/creators/:username/create", () => {
 
   it("creates a creator profile for a new, authenticated user", async () => {
     mockedPrisma.creator.findUnique.mockResolvedValueOnce(null).mockResolvedValueOnce(null);
+    mockedPrisma.creator.findFirst.mockResolvedValueOnce(null);
     const created = {
       id: 4,
       userId: 1,
       username: "bob",
-      walletAddress:
-        "GA7D5LDGFABXNYEO6LZVMTWK5JWEPTODCLYZ7TG4XDZRKKXP6OS5K5JW",
+      walletAddress: OWN_WALLET,
     };
     mockedPrisma.creator.create.mockResolvedValue(created);
 
@@ -619,5 +636,274 @@ describe("GET /api/creators/me/stats (#224)", () => {
     for (const call of mockedPrisma.donation.groupBy.mock.calls) {
       expect(call[0].where).toEqual({ creatorId: 5, verified: true });
     }
+  });
+});
+
+describe("Creator wallet binding (#276)", () => {
+  const OWN_WALLET = "GA7D5LDGFABXNYEO6LZVMTWK5JWEPTODCLYZ7TG4XDZRKKXP6OS5K5JW";
+  const token = generateToken(1, OWN_WALLET);
+  const otherWallet = Keypair.random();
+
+  beforeEach(() => {
+    jest.clearAllMocks();
+    mockedPrisma.creator.findFirst.mockReset();
+    mockedPrisma.creator.findUnique.mockReset();
+    mockedPrisma.creator.create.mockReset();
+    mockedPrisma.creator.update.mockReset();
+  });
+
+  describe("POST /api/creators/:username/create", () => {
+    beforeEach(() => {
+      mockedPrisma.creator.findUnique.mockResolvedValue(null);
+      mockedPrisma.creator.findFirst.mockResolvedValue(null);
+      mockedPrisma.creator.create.mockImplementation(async ({ data }) => ({ id: 4, ...data }));
+    });
+
+    it("defaults the payout wallet to the authenticated user's own wallet", async () => {
+      const res = await request(app)
+        .post("/api/creators/bob/create")
+        .set("Authorization", `Bearer ${token}`)
+        .send({ displayName: "Bob" });
+
+      expect(res.status).toBe(201);
+      expect(mockedPrisma.creator.create).toHaveBeenCalledWith({
+        data: expect.objectContaining({ walletAddress: OWN_WALLET }),
+      });
+    });
+
+    it("accepts the user's own wallet without any signature", async () => {
+      const res = await request(app)
+        .post("/api/creators/bob/create")
+        .set("Authorization", `Bearer ${token}`)
+        .send({ walletAddress: OWN_WALLET });
+
+      expect(res.status).toBe(201);
+    });
+
+    it("rejects a foreign wallet the user has not proven they own", async () => {
+      const res = await request(app)
+        .post("/api/creators/bob/create")
+        .set("Authorization", `Bearer ${token}`)
+        .send({ walletAddress: otherWallet.publicKey() });
+
+      expect(res.status).toBe(403);
+      expect(res.body.code).toBe("FORBIDDEN");
+      expect(mockedPrisma.creator.create).not.toHaveBeenCalled();
+    });
+
+    it("rejects a foreign wallet with a signature that does not match it", async () => {
+      // Signed by somebody else's key, for the victim's address.
+      const victim = Keypair.random();
+      const attacker = Keypair.random();
+      const message = `Sign in to SupportMe\n\nAddress: ${victim.publicKey()}\nNonce: n\nIssued At: now`;
+      challenges.set(victim.publicKey(), { message, expiresAt: Date.now() + 60_000 });
+      const { createHash } = jest.requireActual("crypto") as typeof import("crypto");
+      const hash = createHash("sha256")
+        .update(Buffer.concat([Buffer.from("Stellar Signed Message:\n"), Buffer.from(message)]))
+        .digest();
+
+      const res = await request(app)
+        .post("/api/creators/bob/create")
+        .set("Authorization", `Bearer ${token}`)
+        .send({
+          walletAddress: victim.publicKey(),
+          walletSignature: attacker.sign(hash).toString("base64"),
+        });
+
+      expect(res.status).toBe(401);
+      expect(mockedPrisma.creator.create).not.toHaveBeenCalled();
+    });
+
+    it("rejects a foreign wallet when no challenge was issued for it", async () => {
+      const res = await request(app)
+        .post("/api/creators/bob/create")
+        .set("Authorization", `Bearer ${token}`)
+        .send({ walletAddress: Keypair.random().publicKey(), walletSignature: "AAAA" });
+
+      expect(res.status).toBe(401);
+      expect(mockedPrisma.creator.create).not.toHaveBeenCalled();
+    });
+
+    it("accepts a different payout wallet once its owner proves control", async () => {
+      const res = await request(app)
+        .post("/api/creators/bob/create")
+        .set("Authorization", `Bearer ${token}`)
+        .send({
+          walletAddress: otherWallet.publicKey(),
+          walletSignature: proveWallet(otherWallet),
+        });
+
+      expect(res.status).toBe(201);
+      expect(mockedPrisma.creator.create).toHaveBeenCalledWith({
+        data: expect.objectContaining({ walletAddress: otherWallet.publicKey() }),
+      });
+    });
+
+    it("consumes the challenge so a captured signature cannot be replayed", async () => {
+      const signature = proveWallet(otherWallet);
+      const body = { walletAddress: otherWallet.publicKey(), walletSignature: signature };
+
+      const first = await request(app)
+        .post("/api/creators/bob/create")
+        .set("Authorization", `Bearer ${token}`)
+        .send(body);
+      const second = await request(app)
+        .post("/api/creators/carol/create")
+        .set("Authorization", `Bearer ${token}`)
+        .send(body);
+
+      expect(first.status).toBe(201);
+      expect(second.status).toBe(401);
+    });
+
+    it("rejects a wallet already linked to another creator profile", async () => {
+      mockedPrisma.creator.findFirst.mockResolvedValue({ id: 99 });
+
+      const res = await request(app)
+        .post("/api/creators/bob/create")
+        .set("Authorization", `Bearer ${token}`)
+        .send({ walletAddress: OWN_WALLET });
+
+      expect(res.status).toBe(409);
+      expect(res.body.code).toBe("CONFLICT");
+      expect(mockedPrisma.creator.findFirst).toHaveBeenCalledWith({
+        where: { walletAddress: OWN_WALLET },
+        select: { id: true },
+      });
+      expect(mockedPrisma.creator.create).not.toHaveBeenCalled();
+    });
+
+    it("maps a database unique-violation race to 409", async () => {
+      mockedPrisma.creator.create.mockRejectedValue(
+        new Prisma.PrismaClientKnownRequestError("Unique constraint failed", {
+          code: "P2002",
+          clientVersion: "test",
+        }),
+      );
+
+      const res = await request(app)
+        .post("/api/creators/bob/create")
+        .set("Authorization", `Bearer ${token}`)
+        .send({ walletAddress: OWN_WALLET });
+
+      expect(res.status).toBe(409);
+      expect(res.body.code).toBe("CONFLICT");
+    });
+
+    it("lets a user with no wallet (magic link) create a profile with no payout wallet", async () => {
+      const noWalletToken = generateToken(1, null);
+
+      const res = await request(app)
+        .post("/api/creators/bob/create")
+        .set("Authorization", `Bearer ${noWalletToken}`)
+        .send({});
+
+      expect(res.status).toBe(201);
+      expect(mockedPrisma.creator.create).toHaveBeenCalledWith({
+        data: expect.objectContaining({ walletAddress: "" }),
+      });
+      // No wallet to bind, so no uniqueness lookup either.
+      expect(mockedPrisma.creator.findFirst).not.toHaveBeenCalled();
+    });
+  });
+
+  describe("PUT /api/creators/:username", () => {
+    const existing = { id: 1, userId: 1, username: "bob", walletAddress: OWN_WALLET };
+
+    beforeEach(() => {
+      mockedPrisma.creator.findUnique.mockResolvedValue(existing);
+      mockedPrisma.creator.findFirst.mockResolvedValue(null);
+      mockedPrisma.creator.update.mockImplementation(async ({ data }) => ({ ...existing, ...data }));
+    });
+
+    it("rejects re-pointing the payout wallet at one the user has not proven", async () => {
+      const res = await request(app)
+        .put("/api/creators/bob")
+        .set("Authorization", `Bearer ${token}`)
+        .send({ walletAddress: otherWallet.publicKey() });
+
+      expect(res.status).toBe(403);
+      expect(mockedPrisma.creator.update).not.toHaveBeenCalled();
+    });
+
+    it("accepts a new payout wallet with a valid proof and does not store the signature", async () => {
+      const res = await request(app)
+        .put("/api/creators/bob")
+        .set("Authorization", `Bearer ${token}`)
+        .send({
+          walletAddress: otherWallet.publicKey(),
+          walletSignature: proveWallet(otherWallet),
+        });
+
+      expect(res.status).toBe(200);
+      expect(mockedPrisma.creator.update).toHaveBeenCalledWith({
+        where: { username: "bob" },
+        data: { walletAddress: otherWallet.publicKey() },
+      });
+      expect(mockedPrisma.creator.findFirst).toHaveBeenCalledWith({
+        where: { walletAddress: otherWallet.publicKey(), id: { not: 1 } },
+        select: { id: true },
+      });
+    });
+
+    it("rejects moving to a wallet another profile already uses", async () => {
+      mockedPrisma.creator.findFirst.mockResolvedValue({ id: 7 });
+
+      const res = await request(app)
+        .put("/api/creators/bob")
+        .set("Authorization", `Bearer ${token}`)
+        .send({
+          walletAddress: otherWallet.publicKey(),
+          walletSignature: proveWallet(otherWallet),
+        });
+
+      expect(res.status).toBe(409);
+      expect(res.body.code).toBe("CONFLICT");
+      expect(mockedPrisma.creator.update).not.toHaveBeenCalled();
+    });
+
+    it("does not require proof or a lookup when the wallet is unchanged", async () => {
+      const res = await request(app)
+        .put("/api/creators/bob")
+        .set("Authorization", `Bearer ${token}`)
+        .send({ walletAddress: OWN_WALLET, bio: "same wallet" });
+
+      expect(res.status).toBe(200);
+      expect(mockedPrisma.creator.findFirst).not.toHaveBeenCalled();
+    });
+
+    it("allows switching to the wallet the user signed in with, without a signature", async () => {
+      mockedPrisma.creator.findUnique.mockResolvedValue({ ...existing, walletAddress: "" });
+
+      const res = await request(app)
+        .put("/api/creators/bob")
+        .set("Authorization", `Bearer ${token}`)
+        .send({ walletAddress: OWN_WALLET });
+
+      expect(res.status).toBe(200);
+      expect(mockedPrisma.creator.update).toHaveBeenCalledWith({
+        where: { username: "bob" },
+        data: { walletAddress: OWN_WALLET },
+      });
+    });
+
+    it("maps a database unique-violation race to 409", async () => {
+      mockedPrisma.creator.update.mockRejectedValue(
+        new Prisma.PrismaClientKnownRequestError("Unique constraint failed", {
+          code: "P2002",
+          clientVersion: "test",
+        }),
+      );
+
+      const res = await request(app)
+        .put("/api/creators/bob")
+        .set("Authorization", `Bearer ${token}`)
+        .send({
+          walletAddress: otherWallet.publicKey(),
+          walletSignature: proveWallet(otherWallet),
+        });
+
+      expect(res.status).toBe(409);
+    });
   });
 });

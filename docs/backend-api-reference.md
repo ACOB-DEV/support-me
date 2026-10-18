@@ -417,6 +417,8 @@ Create a creator profile after first wallet sign-in.
 **Notes:**
 - Username must be unique
 - Each user can only have one creator profile
+- `walletAddress` defaults to the signed-in wallet. Using any other payout wallet requires proof of control: request a message from `POST /api/auth/challenge` for that wallet, sign it, and send the base64 signature as `walletSignature` (single use; `403` without it, `401` if invalid or expired)
+- A wallet can be linked to only one creator profile (`409` if already taken)
 - Called after wallet sign-in when `hasProfile` is false
 
 ---
@@ -467,6 +469,8 @@ Update a creator profile.
 
 **Notes:**
 - Only the profile owner can update their profile
+- `walletAddress` may be changed to the signed-in wallet, or to another wallet only with proof of control: request a message from `POST /api/auth/challenge` for that wallet, sign it, and send the base64 signature as `walletSignature` (single use; `403` without it, `401` if invalid or expired)
+- A wallet can be linked to only one creator profile (`409` if already taken)
 - All fields are optional; only provided fields are updated
 
 ---
