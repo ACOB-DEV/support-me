@@ -122,10 +122,11 @@ After verification, update these records in the same release change:
   table in the root `README.md`. Keep prior versions and their addresses for
   history; label the new entries with the release/version and note any interface
   or state-migration caveats.
-- Replace the Testnet sample values for
-  `NEXT_PUBLIC_DONATION_CONTRACT_ID` and
-  `NEXT_PUBLIC_CREATOR_REGISTRY_CONTRACT_ID` in `backend/.env.example` with the
-  newly deployed IDs. Never add a real private key to the example file.
+- Replace the Testnet sample values for `NEXT_PUBLIC_DONATION_CONTRACT_ID`
+  and `NEXT_PUBLIC_CREATOR_REGISTRY_CONTRACT_ID` in `frontend/.env.example`,
+  and for `DONATION_CONTRACT_ID` (backend-scoped; see #302) in
+  `backend/.env.example`, with the newly deployed IDs. Never add a real
+  private key to the example file.
 - Update the corresponding values in local `frontend/.env.local` and
   `backend/.env` files as needed; these files are not deployment configuration
   and must remain untracked.
@@ -142,7 +143,7 @@ and approvals pass. Apply the same new pair of contract IDs together:
   environment. Confirm Preview/Staging values separately rather than copying
   production IDs into every environment by default. Redeploy the frontend so
   the public client is built with the new IDs.
-- **Railway**: update `NEXT_PUBLIC_DONATION_CONTRACT_ID` and
+- **Railway**: update `DONATION_CONTRACT_ID` and
   `NEXT_PUBLIC_CREATOR_REGISTRY_CONTRACT_ID` on the backend service. Set or
   retain `EXECUTOR_SECRET_KEY` only if recurring donations are enabled; its
   public key must match the executor registered on the new donation contract.

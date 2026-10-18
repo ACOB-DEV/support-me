@@ -47,7 +47,8 @@ This runbook documents common production failure modes for SupportMe, including 
 
 2. **Check Environment Variables**
    - Verify `SOROBAN_RPC_URL` is set correctly on Railway/Vercel
-   - Verify `NEXT_PUBLIC_DONATION_CONTRACT_ID` is set
+   - Verify `DONATION_CONTRACT_ID` is set (backend) and
+     `NEXT_PUBLIC_DONATION_CONTRACT_ID` is set (frontend)
 
 3. **If RPC is Down (External Issue)**
    - The system will automatically retry (polling continues every 5s for events, 60s for subscriptions)
@@ -163,7 +164,7 @@ This runbook documents common production failure modes for SupportMe, including 
 
 1. **Check Executor Configuration**
    - Verify `EXECUTOR_SECRET_KEY` is set in Railway environment variables
-   - Verify `NEXT_PUBLIC_DONATION_CONTRACT_ID` is set correctly
+   - Verify `DONATION_CONTRACT_ID` is set correctly
    - Verify executor key has sufficient XLM for transaction fees
 
 2. **Check RPC Status**
@@ -392,7 +393,7 @@ This runbook documents common production failure modes for SupportMe, including 
 
 1. **Check Event Listener Status**
    - Review backend logs for: `SorobanEventListener: polling ...`
-   - If warning appears: `NEXT_PUBLIC_DONATION_CONTRACT_ID is not set`
+   - If warning appears: `DONATION_CONTRACT_ID is not set`
    - Check if listener is running in `server.ts`
 
 2. **Check RPC Connectivity**

@@ -6,10 +6,8 @@
 /**
  * Fetch USD prices for the supported assets from our server route. Returns a
  * map like `{ XLM: 0.1123, USDC: 1 }`. Never throws — returns `{}` on failure.
- *
- * @returns {Promise<Record<string, number>>}
  */
-export async function fetchUsdPrices() {
+export async function fetchUsdPrices(): Promise<Record<string, number>> {
   try {
     const res = await fetch('/api/prices', { headers: { accept: 'application/json' } });
     if (!res.ok) return {};
@@ -23,13 +21,12 @@ export async function fetchUsdPrices() {
 /**
  * Format a crypto amount as its USD equivalent, e.g. `≈ $1.23`. Returns null if
  * we have no price for that asset, so callers can conditionally render.
- *
- * @param {number} amount
- * @param {string} code
- * @param {Record<string, number> | null | undefined} prices
- * @returns {string | null}
  */
-export function formatUsd(amount, code, prices) {
+export function formatUsd(
+  amount: number,
+  code: string,
+  prices: Record<string, number> | null | undefined
+): string | null {
   const price = prices?.[code];
   if (price == null || !Number.isFinite(amount)) return null;
   const usd = amount * price;

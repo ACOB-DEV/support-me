@@ -20,7 +20,7 @@ import {
   subscribe,
   MAX_CHARGE_INTERVAL_DAYS,
 } from '@/lib/contract';
-import { availableAssetCodes, getAsset } from '@/lib/assets';
+import { availableAssetCodes, getAsset, type AssetCode } from '@/lib/assets';
 import { getPlatform } from '@/lib/socials';
 import { API_URL } from '@/lib/api';
 import { describeDonationFailure, type FlowFailure } from '@/lib/failures';
@@ -134,7 +134,7 @@ function CreatorProfileView({ username, locale, onLocaleChange }: CreatorProfile
 
   const [donationAmount, setDonationAmount] = useState('5');
   const [donationMessage, setDonationMessage] = useState('');
-  const [assetCode, setAssetCode] = useState('XLM');
+  const [assetCode, setAssetCode] = useState<AssetCode>('XLM');
   const [sending, setSending] = useState(false);
   const [txStatus, setTxStatus] = useState<string | null>(null);
   const [largeDonationConfirmed, setLargeDonationConfirmed] = useState(false);
@@ -310,6 +310,9 @@ function CreatorProfileView({ username, locale, onLocaleChange }: CreatorProfile
     try {
       const address = await connectWallet();
       setUserAddress(address);
+      // address is null when the user closed the wallet picker without
+      // connecting (see lib/wallet.ts) -- nothing to load or celebrate yet.
+      if (!address) return;
       setBalance(await loadAssetBalance(address, assetCode));
       notify.success(t('walletConnected'));
     } catch (err) {

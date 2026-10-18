@@ -1,4 +1,5 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
+import type { BalanceLine } from '@/lib/assets';
 
 // USDC_ISSUER/USDT_ISSUER are read from process.env at module load time, so
 // each test resets the module registry and re-imports after setting env vars
@@ -8,6 +9,27 @@ const ORIGINAL_ENV = { ...process.env };
 async function loadAssets() {
   const mod = await import('@/lib/assets');
   return mod;
+}
+
+/**
+ * A minimal-but-complete credit-asset balance line for balanceMatcher tests,
+ * which only read asset_code/asset_issuer/asset_type. The other fields are
+ * required by Horizon's real BalanceLineAsset shape but irrelevant here.
+ */
+function creditBalance(assetCode: string, assetIssuer: string | undefined): BalanceLine {
+  return {
+    asset_type: 'credit_alphanum4',
+    asset_code: assetCode,
+    asset_issuer: assetIssuer ?? '',
+    balance: '0',
+    limit: '0',
+    buying_liabilities: '0',
+    selling_liabilities: '0',
+    last_modified_ledger: 0,
+    is_authorized: true,
+    is_authorized_to_maintain_liabilities: true,
+    is_clawback_enabled: false,
+  };
 }
 
 describe('lib/assets', () => {
@@ -59,12 +81,12 @@ describe('lib/assets', () => {
     const { ASSETS } = await loadAssets();
 
     expect(
-      ASSETS.USDT!.balanceMatcher({ asset_code: 'USDT', asset_issuer: process.env.NEXT_PUBLIC_USDT_ISSUER })
+      ASSETS.USDT!.balanceMatcher(creditBalance('USDT', process.env.NEXT_PUBLIC_USDT_ISSUER))
     ).toBe(true);
-    expect(ASSETS.USDT!.balanceMatcher({ asset_code: 'USDT', asset_issuer: 'GSOMEOTHERISSUER' })).toBe(false);
-    expect(ASSETS.USDT!.balanceMatcher({ asset_code: 'USDC', asset_issuer: process.env.NEXT_PUBLIC_USDT_ISSUER })).toBe(
-      false
-    );
+    expect(ASSETS.USDT!.balanceMatcher(creditBalance('USDT', 'GSOMEOTHERISSUER'))).toBe(false);
+    expect(
+      ASSETS.USDT!.balanceMatcher(creditBalance('USDC', process.env.NEXT_PUBLIC_USDT_ISSUER))
+    ).toBe(false);
   });
 
   it('getAsset falls back to XLM for an unconfigured code', async () => {

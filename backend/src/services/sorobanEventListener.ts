@@ -1,5 +1,6 @@
 import { xdr, scValToNative } from "@stellar/stellar-sdk";
 import prisma from "../prisma";
+import { networkReset } from "./networkReset";
 import {
   DONATION_EVENT,
   SUBSCRIPTION_CREATED_EVENT,
@@ -15,7 +16,12 @@ import {
 } from "./eventBus";
 
 const RPC_URL = process.env.SOROBAN_RPC_URL || "https://soroban-testnet.stellar.org";
-const DONATION_CONTRACT_ID = process.env.NEXT_PUBLIC_DONATION_CONTRACT_ID;
+// DONATION_CONTRACT_ID is the backend-scoped name (#302), with a fallback to
+// the old NEXT_PUBLIC_-prefixed name for backward compat with deployments
+// that still only have that one set. Remove the fallback once deployed
+// backends are confirmed migrated to the new name.
+const DONATION_CONTRACT_ID =
+  process.env.DONATION_CONTRACT_ID?.trim() || process.env.NEXT_PUBLIC_DONATION_CONTRACT_ID;
 const CREATOR_REGISTRY_CONTRACT_ID = process.env.NEXT_PUBLIC_CREATOR_REGISTRY_CONTRACT_ID;
 const POLL_INTERVAL_MS = Number(process.env.SOROBAN_EVENTS_POLL_INTERVAL_MS) || 5000;
 // How far back to look for events the first time the listener starts, so a
@@ -65,7 +71,7 @@ export class SorobanEventListener {
   start(): void {
     if (!DONATION_CONTRACT_ID) {
       console.warn(
-        "SorobanEventListener: NEXT_PUBLIC_DONATION_CONTRACT_ID is not set, skipping event polling."
+        "SorobanEventListener: DONATION_CONTRACT_ID is not set, skipping event polling."
       );
       return;
     }
@@ -87,6 +93,15 @@ export class SorobanEventListener {
       clearInterval(this.timer);
       this.timer = null;
     }
+  }
+
+  /**
+   * Drops the stored event cursor so the next poll re-derives its start ledger
+   * from the current chain head. Used by the post-reset resync (#278): the old
+   * cursor points into a ledger sequence that no longer exists.
+   */
+  resetCursor(): void {
+    this.cursor = null;
   }
 
   /**
@@ -244,8 +259,17 @@ export class SorobanEventListener {
 
   private async poll(): Promise<void> {
     if (this.polling) return;
+    // #278: once a reset is detected the listener is stopped, but a poll in
+    // flight must not replay events from the dead network. Checking here too
+    // keeps the guarantee local to the polling loop.
+    if (networkReset.getState().status === "reset_detected") return;
     this.polling = true;
     try {
+      // Run detection on the poll cadence as well: the executor only ticks
+      // once a minute, so this is what makes a reset visible "within one poll
+      // interval". check() is cheap and short-circuits once detected.
+      if (await networkReset.check()) return;
+
       const contractIds = [DONATION_CONTRACT_ID!];
       if (CREATOR_REGISTRY_CONTRACT_ID) {
         contractIds.push(CREATOR_REGISTRY_CONTRACT_ID);

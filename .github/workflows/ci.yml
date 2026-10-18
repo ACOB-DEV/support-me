@@ -6,6 +6,14 @@ on:
   pull_request:
 
 jobs:
+  env-example-drift:
+    name: Check .env.example drift
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Compare shared contract IDs across frontend/.env.example and backend/.env.example
+        run: node scripts/check-env-example-drift.js
+
   contracts:
     name: Contracts (Rust/Soroban)
     runs-on: ubuntu-latest
@@ -39,13 +47,28 @@ jobs:
     defaults:
       run:
         working-directory: backend
+    env:
+      DATABASE_URL: postgresql://postgres:postgres@localhost:5432/supportme?schema=public
+    services:
+      postgres:
+        image: postgres:16
+        env:
+          POSTGRES_PASSWORD: postgres
+          POSTGRES_DB: supportme
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd pg_isready
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
     steps:
       - uses: actions/checkout@v4
 
       - name: Setup Node.js
         uses: actions/setup-node@v4
         with:
-          node-version: 20
+          node-version-file: .nvmrc
           cache: npm
           cache-dependency-path: backend/package-lock.json
 
@@ -57,8 +80,16 @@ jobs:
 
       - name: Build (Prisma client + TypeScript)
         run: npm run build
+
+      - name: Apply migrations
+        run: npx prisma migrate deploy
+
+      - name: Seed demo data twice (idempotency smoke, #280)
+        run: |
+          npx prisma db seed
+          npx prisma db seed
         env:
-          DATABASE_URL: postgresql://postgres:postgres@localhost:5432/supportme?schema=public
+          NODE_ENV: test
 
       - name: Run tests
         run: npm test
@@ -75,7 +106,7 @@ jobs:
       - name: Setup Node.js
         uses: actions/setup-node@v4
         with:
-          node-version: 20
+          node-version-file: .nvmrc
           cache: npm
           cache-dependency-path: frontend/package-lock.json
 
@@ -109,7 +140,7 @@ jobs:
       - name: Setup Node.js
         uses: actions/setup-node@v4
         with:
-          node-version: 20
+          node-version-file: .nvmrc
           cache: npm
           cache-dependency-path: frontend/package-lock.json
 
@@ -185,6 +216,7 @@ jobs:
     # so on a push to main it reports "skipped" rather than succeeding; allow
     # that specific outcome through rather than blocking test-all on it.
     if: always()
+    needs: [env-example-drift, contracts, backend, frontend, e2e, type-drift]
     steps:
       - name: Fail if any required job did not succeed or get skipped
         run: |

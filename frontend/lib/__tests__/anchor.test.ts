@@ -195,7 +195,7 @@ describe('sendWithdrawPayment', () => {
     withdraw_anchor_account: StellarSdk.Keypair.random().publicKey(),
     amount_in: '10',
     withdraw_memo: '1234567890',
-    withdraw_memo_type: 'id',
+    withdraw_memo_type: 'id' as const,
   };
 
   afterEach(() => vi.restoreAllMocks());

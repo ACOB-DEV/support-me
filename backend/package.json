@@ -3,6 +3,10 @@
   "version": "0.1.0",
   "private": true,
   "main": "dist/server.js",
+  "engines": {
+    "node": ">=20",
+    "npm": ">=10"
+  },
   "scripts": {
     "dev": "ts-node-dev --respawn --transpile-only src/server.ts",
     "build": "prisma generate && tsc",
@@ -13,6 +17,11 @@
     "prisma:deploy": "prisma migrate deploy",
     "test": "jest",
     "lint": "eslint ."
+    "prisma:seed": "ts-node --transpile-only prisma/seed.ts",
+    "test": "jest"
+  },
+  "prisma": {
+    "seed": "ts-node --transpile-only prisma/seed.ts"
   },
   "dependencies": {
     "@prisma/client": "^5.10.0",
@@ -37,6 +46,7 @@
     "prisma": "^5.10.0",
     "supertest": "^7.2.2",
     "ts-jest": "^29.4.11",
+    "ts-node": "^10.9.2",
     "ts-node-dev": "^2.0.0",
     "typescript": "^5.6.2",
     "typescript-eslint": "^8.71.2"

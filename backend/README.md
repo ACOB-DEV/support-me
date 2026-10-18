@@ -40,6 +40,21 @@ It is built with TypeScript, Express, and Prisma, and is designed to support cre
    http://localhost:4000/health
    ```
 
+## Seeding demo data
+
+For local and testnet demos, populate the database with creators, goals,
+donations, one recurring subscription and one withdrawal:
+
+```bash
+npx prisma db seed        # runs prisma/seed.ts via ts-node
+npx prisma db seed -- --fund   # also fund the demo wallets via Friendbot (testnet)
+```
+
+The seed is idempotent — every row is upserted on a stable natural key, so
+running it twice produces no duplicates. It refuses to run against a
+`NODE_ENV=production` database unless `SEED_FORCE=true` is set. The demo wallet
+addresses are public keys only; no secret keys are stored.
+
 ## API Endpoints
 
 - `GET /health`
@@ -66,6 +81,15 @@ the per-endpoint timeout (the health probe allows 1.5 seconds per endpoint and
 up to 3 seconds total for failover). Each
 successful request logs the endpoint that served it, and failed endpoints are
 logged before the next attempt.
+
+The response also carries `network: "ok" | "reset_detected"`. On boot — and on
+every event-listener poll — the backend compares the chain's latest ledger with
+a stored checkpoint and checks that the donation contract still exists. A
+testnet reset makes the latest ledger move backwards or the contract vanish, at
+which point `status` becomes `"unhealthy"`, `network` becomes
+`"reset_detected"`, and the executor and event listener pause so they stop
+charging against the dead chain. Recovery steps are in
+[the testnet reset runbook](../docs/testnet-troubleshooting.md#testnet-reset-runbook).
 
 ## Notes for Contributors
 

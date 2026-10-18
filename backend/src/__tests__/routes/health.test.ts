@@ -5,6 +5,17 @@ jest.mock("../../prisma", () => ({
 jest.mock("../../services/sorobanHealth", () => ({
   checkSorobanRpc: jest.fn().mockResolvedValue({ status: "ok", latencyMs: 4 }),
 }));
+jest.mock("../../services/networkReset", () => ({
+  networkReset: {
+    getState: jest.fn(() => ({
+      status: "ok",
+      reason: null,
+      detectedAt: null,
+      lastSeenLedger: null,
+      latestLedger: null,
+    })),
+  },
+}));
 
 import request from "supertest";
 import app from "../../app";
@@ -19,8 +30,27 @@ describe("GET /health", () => {
     const res = await request(app).get("/health");
     expect(res.status).toBe(200);
     expect(res.body.status).toBe("ok");
+    expect(res.body.network).toBe("ok");
     expect(typeof res.body.timestamp).toBe("string");
     expect(res.body.dependencies.sorobanRpc.status).toBe("ok");
+  });
+
+  it("reports reset_detected and unhealthy when a testnet reset was detected (#278)", async () => {
+    const { networkReset } = await import("../../services/networkReset");
+    (networkReset.getState as jest.Mock).mockReturnValueOnce({
+      status: "reset_detected",
+      reason: "latest ledger went backwards",
+      detectedAt: "2026-01-01T00:00:00.000Z",
+      lastSeenLedger: 900,
+      latestLedger: 5,
+    });
+
+    const res = await request(app).get("/health");
+
+    expect(res.status).toBe(200);
+    expect(res.body.status).toBe("unhealthy");
+    expect(res.body.network).toBe("reset_detected");
+    expect(res.body.dependencies.network.status).toBe("reset_detected");
   });
 
   it("reports degraded status when Soroban RPC is unavailable", async () => {

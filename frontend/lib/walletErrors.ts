@@ -5,17 +5,26 @@
 // conservative message heuristics with a friendly fallback.
 
 import { troubleshootingUrl } from './docs';
+import type { WalletConnectErrorData } from '@/components/WalletConnectError';
 
 export const WALLET_CATEGORY = {
   NO_WALLET: 'NO_WALLET',
   USER_REJECTED: 'USER_REJECTED',
   WRONG_NETWORK: 'WRONG_NETWORK',
   UNKNOWN: 'UNKNOWN',
-};
+} as const;
+
+export type WalletCategory = (typeof WALLET_CATEGORY)[keyof typeof WALLET_CATEGORY];
+
+export interface WalletInstallLink {
+  name: string;
+  url: string;
+  description: string;
+}
 
 // Install targets shown when no wallet is detected. URLs match each module's
-// own product page from @creit-tech/stellar-wallets-kit.
-export const WALLET_INSTALL_LINKS = [
+// own product page from @creit.tech/stellar-wallets-kit.
+export const WALLET_INSTALL_LINKS: WalletInstallLink[] = [
   {
     name: 'Freighter',
     url: 'https://freighter.app',
@@ -43,7 +52,10 @@ export const WALLET_INSTALL_LINKS = [
   },
 ];
 
-const CATEGORY_META = {
+type CategoryMeta = Required<Pick<WalletConnectErrorData, 'type' | 'title' | 'message' | 'action' | 'retryLabel'>> &
+  Pick<WalletConnectErrorData, 'showInstallLinks'>;
+
+const CATEGORY_META: Record<WalletCategory, CategoryMeta> = {
   [WALLET_CATEGORY.NO_WALLET]: {
     type: WALLET_CATEGORY.NO_WALLET,
     title: 'No Stellar wallet detected',
@@ -64,18 +76,15 @@ const CATEGORY_META = {
   [WALLET_CATEGORY.WRONG_NETWORK]: {
     type: WALLET_CATEGORY.WRONG_NETWORK,
     title: 'Wrong network',
-    message:
-      'Your wallet is on a different network. SupportMe runs on the Stellar testnet.',
+    message: 'Your wallet is on a different network. SupportMe runs on the Stellar testnet.',
     action: 'Switch your wallet to the Stellar testnet, then try again.',
     retryLabel: 'Try again',
   },
   [WALLET_CATEGORY.UNKNOWN]: {
     type: WALLET_CATEGORY.UNKNOWN,
     title: 'Could not connect your wallet',
-    message:
-      'Something unexpected went wrong while connecting your wallet.',
-    action:
-      'You can try again. If it keeps failing, check that your wallet extension is up to date.',
+    message: 'Something unexpected went wrong while connecting your wallet.',
+    action: 'You can try again. If it keeps failing, check that your wallet extension is up to date.',
     retryLabel: 'Try again',
   },
 };
@@ -83,11 +92,11 @@ const CATEGORY_META = {
 // Every title this module can show. Each must have a matching heading in
 // docs/testnet-troubleshooting.md (enforced by troubleshootingDoc.test.ts),
 // since results link to that section via `docsUrl`.
-export const WALLET_ERROR_TITLES = Object.values(CATEGORY_META).map((meta) => meta.title);
+export const WALLET_ERROR_TITLES: string[] = Object.values(CATEGORY_META).map((meta) => meta.title);
 
 // Ordered list of matchers. NO_WALLET wins over the others because messages
 // like "Freighter is not connected" must not be read as a user rejection.
-const PATTERNS = [
+const PATTERNS: { type: WalletCategory; test: RegExp }[] = [
   {
     type: WALLET_CATEGORY.NO_WALLET,
     test:
@@ -105,6 +114,9 @@ const PATTERNS = [
   },
 ];
 
+/** The loosely-typed shapes a wallet operation can reject with: a real Error, the kit's `{ code, message }` object, or a plain string. */
+type RawWalletFailure = Error | { message?: string; error?: { message?: string } } | string | unknown;
+
 /**
  * Maps any value raised by a wallet operation (Error, kit `{ code, message }`
  * object, or plain string) to a category with a user-facing title, message,
@@ -112,8 +124,9 @@ const PATTERNS = [
  * troubleshooting section. Raw messages are kept on the result
  * so the UI can surface them in the fallback (UNKNOWN) case only.
  */
-export function categorizeWalletError(err) {
-  const message = [err?.message, err?.error?.message, typeof err === 'string' ? err : null]
+export function categorizeWalletError(err: RawWalletFailure): WalletConnectErrorData {
+  const raw = err as { message?: string; error?: { message?: string } } | null | undefined;
+  const message = [raw?.message, raw?.error?.message, typeof err === 'string' ? err : null]
     .filter(Boolean)
     .join(' ')
     .trim();
@@ -129,7 +142,7 @@ export function categorizeWalletError(err) {
   // specific thing we have for cases the mapping doesn't cover (e.g. a
   // backend sign-in challenge rejection), and the generic string is only used
   // when there is nothing else to show.
-  const fallback = {
+  const fallback: WalletConnectErrorData = {
     ...CATEGORY_META[WALLET_CATEGORY.UNKNOWN],
     docsUrl: troubleshootingUrl(CATEGORY_META[WALLET_CATEGORY.UNKNOWN].title),
   };
