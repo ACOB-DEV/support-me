@@ -25,6 +25,7 @@ jest.mock("../../services/donationNotifications", () => ({
   notifyGoalsReached: jest.fn(),
 }));
 
+import { Subscription } from "@prisma/client";
 import prisma from "../../prisma";
 import { SubscriptionExecutor } from "../../services/subscriptionExecutor";
 import {
@@ -33,6 +34,15 @@ import {
 } from "../../services/subscriptionNotifications";
 import { applyDonationToGoals } from "../../services/goalService";
 import { notifyGoalsReached } from "../../services/donationNotifications";
+
+// `charge` and `submitCharge` are private; this type exposes exactly those
+// two members for the tests below to call directly, instead of casting the
+// whole executor instance to `any` and losing type-checking on everything
+// else these tests touch on it.
+type ExecutorTestAccess = {
+  submitCharge: (subscription: Subscription) => Promise<string>;
+  charge: (subscription: Subscription) => Promise<void>;
+};
 
 const mockedPrisma = prisma as unknown as {
   subscription: { findMany: jest.Mock; update: jest.Mock };
@@ -68,19 +78,21 @@ describe("SubscriptionExecutor donation indexing", () => {
     jest.clearAllMocks();
     mockedPrisma.donation.upsert.mockResolvedValue({ id: 1 });
     mockedPrisma.subscription.update.mockResolvedValue(subscription);
-    mockedPrisma.$transaction.mockImplementation(async (callback: any) => {
-      if (typeof callback === "function") {
-        return callback(mockedPrisma);
+    mockedPrisma.$transaction.mockImplementation(
+      async (callback: ((client: typeof mockedPrisma) => Promise<unknown>) | Promise<unknown>[]) => {
+        if (typeof callback === "function") {
+          return callback(mockedPrisma);
+        }
+        return Promise.all(callback);
       }
-      return Promise.all(callback);
-    });
+    );
     mockedRenewed.mockResolvedValue(undefined);
     mockedApplyToGoals.mockResolvedValue([]);
     mockedNotifyGoalsReached.mockResolvedValue(undefined);
   });
 
   it("upserts a confirmed recurring charge by its on-chain identity", async () => {
-    const executor = new SubscriptionExecutor() as any;
+    const executor = new SubscriptionExecutor() as unknown as ExecutorTestAccess;
     executor.submitCharge = jest.fn().mockResolvedValue("charge-tx");
 
     await executor.charge(subscription);
@@ -107,7 +119,7 @@ describe("SubscriptionExecutor donation indexing", () => {
   it("notifies the creator about goals the recurring charge carried to their target", async () => {
     const reachedGoal = { id: 3, creatorId: 7, title: "New mic", targetAmount: 100, currency: "XLM" };
     mockedApplyToGoals.mockResolvedValue([reachedGoal]);
-    const executor = new SubscriptionExecutor() as any;
+    const executor = new SubscriptionExecutor() as unknown as ExecutorTestAccess;
     executor.submitCharge = jest.fn().mockResolvedValue("charge-tx");
 
     await executor.charge(subscription);

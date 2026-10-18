@@ -1,4 +1,4 @@
-import { Response, NextFunction } from 'express';
+import { RequestHandler } from 'express';
 import { AuthRequest } from './auth';
 import { ForbiddenError } from '../errors/AppError';
 
@@ -15,7 +15,13 @@ const parseAdminWallets = (): string[] =>
     .map((w) => w.trim())
     .filter(Boolean);
 
-export const adminAuth = (req: AuthRequest, res: Response, next: NextFunction) => {
+// Typed as a plain `RequestHandler`, same reasoning as `authMiddleware` in
+// `./auth`: it needs `AuthRequest`'s `.user`, which `authMiddleware` (running
+// first in the chain) has already attached, but a handler typed to accept
+// only `AuthRequest` isn't assignable where Express expects one accepting
+// `Request`.
+export const adminAuth: RequestHandler = (req, res, next) => {
+  const authReq = req as AuthRequest;
   const admins = parseAdminWallets();
 
   if (admins.length === 0) {
@@ -23,7 +29,7 @@ export const adminAuth = (req: AuthRequest, res: Response, next: NextFunction) =
     return next(new ForbiddenError('Admin access required'));
   }
 
-  if (!req.user || !req.user.walletAddress || !admins.includes(req.user.walletAddress)) {
+  if (!authReq.user || !authReq.user.walletAddress || !admins.includes(authReq.user.walletAddress)) {
     return next(new ForbiddenError('Admin access required'));
   }
 

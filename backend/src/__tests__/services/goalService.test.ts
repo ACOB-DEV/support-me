@@ -8,6 +8,7 @@ jest.mock("../../prisma", () => ({
   },
 }));
 
+import { Prisma } from "@prisma/client";
 import prisma from "../../prisma";
 import { applyDonationToGoals, computePeriodEnd, resetDueGoals } from "../../services/goalService";
 
@@ -18,7 +19,7 @@ const mockedPrisma = prisma as unknown as {
 // applyDonationToGoals takes a Prisma.TransactionClient — a plain mocked
 // object with the same shape works fine since it's only ever used for
 // `.goal.findMany`/`.goal.update` calls.
-const fakeTransactionClient = () => mockedPrisma as any;
+const fakeTransactionClient = () => mockedPrisma as unknown as Prisma.TransactionClient;
 
 describe("applyDonationToGoals", () => {
   it("does nothing when the creator has no active goals in that currency", async () => {

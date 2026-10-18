@@ -14,8 +14,7 @@
 
 use common::{AdminAction, AdminProposal, CreatorProfile};
 use soroban_sdk::{
-    contract, contractevent, contractimpl, symbol_short, Address, Env, String, Symbol,
-    Vec,
+    contract, contractevent, contractimpl, symbol_short, Address, Env, String, Symbol, Vec,
 };
 
 const ADMIN_KEY: Symbol = symbol_short!("admin");
@@ -106,7 +105,9 @@ impl CreatorRegistryContract {
         env.storage().instance().set(&ADMINS_KEY, &admins);
         env.storage().instance().set(&THRESHOLD_KEY, &1u32);
         env.storage().instance().set(&TIMELOCK_DELAY_KEY, &0u64);
-        env.storage().instance().set(&DONATION_KEY, &donation_contract);
+        env.storage()
+            .instance()
+            .set(&DONATION_KEY, &donation_contract);
     }
 
     /// One-time multi-sig setup: configures admin list, threshold, and timelock delay.
@@ -121,8 +122,11 @@ impl CreatorRegistryContract {
             !env.storage().instance().has(&ADMIN_KEY) && !env.storage().instance().has(&ADMINS_KEY),
             "registry already initialized"
         );
-        assert!(admins.len() > 0, "admin list cannot be empty");
-        assert!(threshold > 0 && threshold <= admins.len(), "invalid signature threshold");
+        assert!(!admins.is_empty(), "admin list cannot be empty");
+        assert!(
+            threshold > 0 && threshold <= admins.len(),
+            "invalid signature threshold"
+        );
 
         for i in 0..admins.len() {
             admins.get(i).unwrap().require_auth();
@@ -132,8 +136,12 @@ impl CreatorRegistryContract {
         env.storage().instance().set(&ADMIN_KEY, &primary_admin);
         env.storage().instance().set(&ADMINS_KEY, &admins);
         env.storage().instance().set(&THRESHOLD_KEY, &threshold);
-        env.storage().instance().set(&TIMELOCK_DELAY_KEY, &timelock_delay);
-        env.storage().instance().set(&DONATION_KEY, &donation_contract);
+        env.storage()
+            .instance()
+            .set(&TIMELOCK_DELAY_KEY, &timelock_delay);
+        env.storage()
+            .instance()
+            .set(&DONATION_KEY, &donation_contract);
     }
 
     /// Returns whether a given address is an authorized contract admin.
@@ -154,10 +162,21 @@ impl CreatorRegistryContract {
     /// Proposes a multi-signature administrative action.
     pub fn propose_admin_action(env: Env, proposer: Address, action: AdminAction) -> u64 {
         proposer.require_auth();
-        assert!(Self::is_admin(env.clone(), proposer.clone()), "proposer is not an admin");
+        assert!(
+            Self::is_admin(env.clone(), proposer.clone()),
+            "proposer is not an admin"
+        );
 
-        let prop_id: u64 = env.storage().persistent().get(&PROPOSAL_COUNTER_KEY).unwrap_or(0);
-        let timelock: u64 = env.storage().instance().get(&TIMELOCK_DELAY_KEY).unwrap_or(0);
+        let prop_id: u64 = env
+            .storage()
+            .persistent()
+            .get(&PROPOSAL_COUNTER_KEY)
+            .unwrap_or(0);
+        let timelock: u64 = env
+            .storage()
+            .instance()
+            .get(&TIMELOCK_DELAY_KEY)
+            .unwrap_or(0);
         let now = env.ledger().timestamp();
         let eta = now.checked_add(timelock).expect("proposal eta overflow");
 
@@ -171,8 +190,12 @@ impl CreatorRegistryContract {
             executed: false,
         };
 
-        env.storage().persistent().set(&(PROPOSAL_KEY, prop_id), &proposal);
-        env.storage().persistent().set(&(APPROVAL_KEY, prop_id, proposer.clone()), &true);
+        env.storage()
+            .persistent()
+            .set(&(PROPOSAL_KEY, prop_id), &proposal);
+        env.storage()
+            .persistent()
+            .set(&(APPROVAL_KEY, prop_id, proposer.clone()), &true);
         env.storage().persistent().set(
             &PROPOSAL_COUNTER_KEY,
             &prop_id.checked_add(1).expect("proposal counter overflow"),
@@ -191,7 +214,10 @@ impl CreatorRegistryContract {
     /// Approves an existing administrative proposal.
     pub fn approve_admin_action(env: Env, admin: Address, proposal_id: u64) {
         admin.require_auth();
-        assert!(Self::is_admin(env.clone(), admin.clone()), "caller is not an admin");
+        assert!(
+            Self::is_admin(env.clone(), admin.clone()),
+            "caller is not an admin"
+        );
 
         let mut proposal: AdminProposal = env
             .storage()
@@ -207,12 +233,16 @@ impl CreatorRegistryContract {
             .unwrap_or(false);
         assert!(!has_approved, "admin has already approved this proposal");
 
-        env.storage().persistent().set(&(APPROVAL_KEY, proposal_id, admin.clone()), &true);
+        env.storage()
+            .persistent()
+            .set(&(APPROVAL_KEY, proposal_id, admin.clone()), &true);
         proposal.approvals_count = proposal
             .approvals_count
             .checked_add(1)
             .expect("approvals count overflow");
-        env.storage().persistent().set(&(PROPOSAL_KEY, proposal_id), &proposal);
+        env.storage()
+            .persistent()
+            .set(&(PROPOSAL_KEY, proposal_id), &proposal);
 
         ProposalApprovedEvent {
             proposal_id,
@@ -225,7 +255,10 @@ impl CreatorRegistryContract {
     /// Executes an administrative proposal once signature threshold & timelock criteria are met.
     pub fn execute_admin_action(env: Env, executor: Address, proposal_id: u64) {
         executor.require_auth();
-        assert!(Self::is_admin(env.clone(), executor.clone()), "caller is not an admin");
+        assert!(
+            Self::is_admin(env.clone(), executor.clone()),
+            "caller is not an admin"
+        );
 
         let mut proposal: AdminProposal = env
             .storage()
@@ -234,14 +267,21 @@ impl CreatorRegistryContract {
             .expect("proposal not found");
         assert!(!proposal.executed, "proposal already executed");
 
-        let threshold: u32 = env.storage().instance().get(&THRESHOLD_KEY).expect("threshold not set");
+        let threshold: u32 = env
+            .storage()
+            .instance()
+            .get(&THRESHOLD_KEY)
+            .expect("threshold not set");
         assert!(
             proposal.approvals_count >= threshold,
             "insufficient signatures to execute proposal"
         );
 
         let now = env.ledger().timestamp();
-        assert!(now >= proposal.eta, "proposal timelock delay has not elapsed");
+        assert!(
+            now >= proposal.eta,
+            "proposal timelock delay has not elapsed"
+        );
 
         match proposal.action.clone() {
             AdminAction::SetDonationContract(target) => {
@@ -263,9 +303,12 @@ impl CreatorRegistryContract {
                         new_admins.push_back(a);
                     }
                 }
-                assert!(new_admins.len() > 0, "cannot remove all admins");
+                assert!(!new_admins.is_empty(), "cannot remove all admins");
                 let threshold: u32 = env.storage().instance().get(&THRESHOLD_KEY).unwrap();
-                assert!(threshold <= new_admins.len(), "threshold exceeds remaining admin count");
+                assert!(
+                    threshold <= new_admins.len(),
+                    "threshold exceeds remaining admin count"
+                );
                 env.storage().instance().set(&ADMINS_KEY, &new_admins);
             }
             AdminAction::SetThreshold(new_threshold) => {
@@ -280,7 +323,9 @@ impl CreatorRegistryContract {
         }
 
         proposal.executed = true;
-        env.storage().persistent().set(&(PROPOSAL_KEY, proposal_id), &proposal);
+        env.storage()
+            .persistent()
+            .set(&(PROPOSAL_KEY, proposal_id), &proposal);
 
         ProposalExecutedEvent {
             proposal_id,
@@ -300,7 +345,9 @@ impl CreatorRegistryContract {
                 .get(&ADMIN_KEY)
                 .expect("registry not initialized");
             admin.require_auth();
-            env.storage().instance().set(&DONATION_KEY, &donation_contract);
+            env.storage()
+                .instance()
+                .set(&DONATION_KEY, &donation_contract);
         } else {
             panic!("multi-sig required: use propose_admin_action to set donation contract");
         }
@@ -309,13 +356,14 @@ impl CreatorRegistryContract {
     /// Register a new creator profile. Must be signed by the creator.
     pub fn register_creator(env: Env, creator: Address, username: String) -> CreatorProfile {
         creator.require_auth();
-        
-        let profile = if let Some(p) = env.storage().persistent().get::<_, CreatorProfile>(&creator) {
+
+        let profile = if let Some(p) = env
+            .storage()
+            .persistent()
+            .get::<_, CreatorProfile>(&creator)
+        {
             // If the profile exists, it must be a placeholder created by record_donation
-            assert!(
-                p.username.len() == 0,
-                "creator already registered"
-            );
+            assert!(p.username.is_empty(), "creator already registered");
             CreatorProfile {
                 address: creator.clone(),
                 username: username.clone(),
@@ -341,9 +389,12 @@ impl CreatorRegistryContract {
 
     /// Read a creator's profile, if one exists.
     pub fn get_creator(env: Env, creator: Address) -> Option<CreatorProfile> {
-        let profile = env.storage().persistent().get::<_, CreatorProfile>(&creator);
+        let profile = env
+            .storage()
+            .persistent()
+            .get::<_, CreatorProfile>(&creator);
         if let Some(p) = profile {
-            if p.username.len() > 0 {
+            if !p.username.is_empty() {
                 return Some(p);
             }
         }
@@ -405,7 +456,9 @@ impl CreatorRegistryContract {
         creator.require_auth();
         assert!(goal_amount >= 0, "Goal amount cannot be negative");
 
-        env.storage().persistent().set(&(GOAL_KEY, creator.clone()), &goal_amount);
+        env.storage()
+            .persistent()
+            .set(&(GOAL_KEY, creator.clone()), &goal_amount);
 
         GoalUpdatedEvent {
             creator,
@@ -546,7 +599,7 @@ mod tests {
 
         let prop = client.get_proposal(&prop_id).unwrap();
         assert_eq!(prop.approvals_count, 1);
-        assert_eq!(prop.executed, false);
+        assert!(!prop.executed);
 
         client.approve_admin_action(&admin2, &prop_id);
 
@@ -556,7 +609,7 @@ mod tests {
         client.execute_admin_action(&admin1, &prop_id);
 
         let prop_after = client.get_proposal(&prop_id).unwrap();
-        assert_eq!(prop_after.executed, true);
+        assert!(prop_after.executed);
     }
 
     #[test]
@@ -571,7 +624,7 @@ mod tests {
         let creator = Address::generate(&env);
 
         client.initialize(&admin, &donation_contract);
-        
+
         // Donation comes first, creating a placeholder profile
         client.record_donation(&donation_contract, &creator, &1000);
 
@@ -583,7 +636,7 @@ mod tests {
         assert_eq!(profile.username, String::from_bytes(&env, b"late_dev"));
         assert_eq!(profile.total_donations, 1000);
         assert_eq!(profile.donation_count, 1);
-        
+
         let fetched = client.get_creator(&creator).unwrap();
         assert_eq!(fetched.username, String::from_bytes(&env, b"late_dev"));
         assert_eq!(fetched.total_donations, 1000);

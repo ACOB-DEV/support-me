@@ -3,6 +3,7 @@ import { NextFunction, Request, Response } from "express";
 import { log } from "../lib/logger";
 
 declare global {
+  // eslint-disable-next-line @typescript-eslint/no-namespace -- Express's own documented pattern for augmenting its Request type via declaration merging; there is no ES module equivalent for extending a third-party ambient namespace.
   namespace Express {
     interface Request {
       requestId?: string;

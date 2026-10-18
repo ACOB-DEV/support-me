@@ -1,4 +1,4 @@
-import { Request, Response, NextFunction } from 'express';
+import { Request, RequestHandler } from 'express';
 import * as jwt from 'jsonwebtoken';
 import { UnauthorizedError } from '../errors/AppError';
 import { getJwtSecret } from '../config';
@@ -16,8 +16,15 @@ export interface AuthRequest extends Request {
   };
 }
 
-export const authMiddleware = (req: AuthRequest, res: Response, next: NextFunction) => {
-  const token = req.headers.authorization?.split(' ')[1];
+// Typed as a plain `RequestHandler` (not `(req: AuthRequest, ...) => void`) so
+// it can be passed straight to `router.use`/`router.get` etc. without an
+// `as any` cast at every call site: a handler accepting the narrower
+// `AuthRequest` isn't assignable where Express expects one accepting
+// `Request`, even though this function only ever runs within this app's own
+// Express instance. The cast narrows in exactly one place instead of 16.
+export const authMiddleware: RequestHandler = (req, res, next) => {
+  const authReq = req as AuthRequest;
+  const token = authReq.headers.authorization?.split(' ')[1];
 
   if (!token) {
     return next(new UnauthorizedError('No token provided'));
@@ -28,9 +35,9 @@ export const authMiddleware = (req: AuthRequest, res: Response, next: NextFuncti
       id: number;
       walletAddress: string | null;
     };
-    req.user = decoded;
+    authReq.user = decoded;
     next();
-  } catch (error) {
+  } catch {
     return next(new UnauthorizedError('Invalid token'));
   }
 };

@@ -4,7 +4,7 @@
 
 SupportMe is a creator tipping and donation platform. This enables creators on Stellar to receive donations and tips easily through embedded widgets or shareable links.
 
-**Live demo**: [https://support-mee.vercel.app/](https://support-mee.vercel.app/) · **Demo video**: [Loom](https://www.loom.com/share/4468e89fd67745d39fb64033e6660b16)
+**Live demo**: [https://support-mee.vercel.app/](https://support-mee.vercel.app/) · **Demo video**: [Loom](https://www.loom.com/share/4468e89fd67745d39fb64033e6660b16) · **Testnet demo walkthrough**: [docs/testnet-demo-walkthrough.md](docs/testnet-demo-walkthrough.md)
 
 ## Architecture
 
@@ -621,16 +621,25 @@ npm test
 
 [`.github/workflows/ci.yml`](.github/workflows/ci.yml) runs independent jobs on every push and pull request to `main`, tied together by a single required `test-all` status check:
 
-- **Contracts**: `cargo test --workspace` for all three crates, then a release build to
+- **Contracts**: `cargo fmt --all -- --check`, `cargo test --workspace` for all three crates,
+  `cargo clippy --workspace --all-targets -- -D warnings`, then a release build to
   `wasm32v1-none` to confirm both contracts still compile to WASM.
-- **Backend**: `npm run build` (Prisma client generation + `tsc`), then
+- **Backend**: `npm run lint` (ESLint, flat config), `npm run build` (Prisma client generation + `tsc`), then
   `npm test`.
-- **Frontend**: `npx tsc --noEmit`, then `npm test`, then `npm run build`.
+- **Frontend**: `npx tsc --noEmit`, `npm run lint` (ESLint, flat config), then `npm test`, then `npm run build`.
+- **Dependency Review**: On pull requests, GitHub's Dependency Review Action fails the check if the
+  dependency changes in that PR introduce a new high-severity (or above) vulnerability; it does not
+  re-flag vulnerabilities that already exist in `main`'s dependency tree.
 - **Type Drift**: Verifies that changes to shared contract types (`contracts/common/src/lib.rs`) are accompanied by frontend TypeScript updates.
 - **All tests passed**: A single job depending on all the above to provide a unified 'all green' status for branch protection.
 None of the jobs require real secrets or a live database — backend tests
 mock Prisma, and the Prisma client can be generated from `schema.prisma`
 without a reachable `DATABASE_URL`.
+
+[`.github/dependabot.yml`](.github/dependabot.yml) opens weekly update pull requests for npm in
+`frontend/` and `backend/`, the root Cargo workspace, and the GitHub Actions workflows themselves;
+minor/patch updates within each ecosystem are grouped into one pull request instead of one per
+dependency.
 
 ## Deployment
 

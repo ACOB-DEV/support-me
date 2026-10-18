@@ -17,7 +17,7 @@ const router = Router();
 // All admin routes require a verified JWT (authMiddleware) AND an allowlisted
 // wallet (adminAuth). This data exposes every user's wallet + earnings, so both
 // gates always run first.
-router.use(authMiddleware as any, adminAuth as any, adminAuditMiddleware);
+router.use(authMiddleware, adminAuth, adminAuditMiddleware);
 
 // Earnings keyed by currency, e.g. { XLM: 1234.5, USDC: 50 }. XLM and USDC are
 // not equal in value, so we never collapse them into one number.

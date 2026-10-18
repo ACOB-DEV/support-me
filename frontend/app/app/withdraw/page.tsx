@@ -46,14 +46,17 @@ export default function WithdrawPage() {
     if (!walletAddress) { setBalancesLoading(false); return; }
     server.loadAccount(walletAddress)
       .then((account) => {
-        const native = account.balances.find((b) => b.asset_type === 'native');
-        setXlmBalance(native ? Math.round(parseFloat((native as any).balance)).toString() : '0');
+        const native = account.balances.find(
+          (b): b is StellarSdk.Horizon.HorizonApi.BalanceLineNative => b.asset_type === 'native'
+        );
+        setXlmBalance(native ? Math.round(parseFloat(native.balance)).toString() : '0');
 
         const usdcIssuer = process.env.NEXT_PUBLIC_USDC_ISSUER;
         const usdc = account.balances.find(
-          (b) => (b as any).asset_code === 'USDC' && (!usdcIssuer || (b as any).asset_issuer === usdcIssuer)
+          (b): b is StellarSdk.Horizon.HorizonApi.BalanceLineAsset =>
+            'asset_code' in b && b.asset_code === 'USDC' && (!usdcIssuer || b.asset_issuer === usdcIssuer)
         );
-        setUsdcBalance(usdc ? Math.round(parseFloat((usdc as any).balance)).toString() : null);
+        setUsdcBalance(usdc ? Math.round(parseFloat(usdc.balance)).toString() : null);
       })
       .catch(() =>
         notify.error(

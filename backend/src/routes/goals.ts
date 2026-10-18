@@ -41,7 +41,7 @@ router.get(
 
 router.post(
   "/:username",
-  authMiddleware as any,
+  authMiddleware,
   validate({ params: usernameParamSchema, body: createGoalSchema }),
   asyncHandler(async (req: AuthRequest, res) => {
     const { username } = req.params;
@@ -78,7 +78,7 @@ router.post(
 
 router.put(
   "/:id",
-  authMiddleware as any,
+  authMiddleware,
   validate({ params: goalIdParamSchema, body: updateGoalSchema }),
   asyncHandler(async (req: AuthRequest, res) => {
     if (!req.user) {
@@ -128,7 +128,7 @@ router.put(
 
 router.delete(
   "/:id",
-  authMiddleware as any,
+  authMiddleware,
   validate({ params: goalIdParamSchema }),
   asyncHandler(async (req: AuthRequest, res) => {
     if (!req.user) {

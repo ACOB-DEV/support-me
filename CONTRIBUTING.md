@@ -103,6 +103,18 @@ required environment variables, and curl walkthroughs.
 - Design new UI areas (widgets, themes, …) in `docs/design/` before implementing them.
 - Avoid adding contract complexity unless it is required by the feature.
 
+## Dependency Updates
+
+[Dependabot](.github/dependabot.yml) opens automated pull requests on a weekly
+schedule for four ecosystems: npm in `frontend/`, npm in `backend/`, the root
+Cargo workspace (`contracts/`), and the GitHub Actions used in
+`.github/workflows/`. Expect roughly one pull request per ecosystem per week
+under normal circumstances, since minor and patch updates within each
+ecosystem are grouped into a single pull request rather than opened one at a
+time; a major version bump still opens its own pull request. Review and merge
+these the same way as any other pull request, including running the affected
+test suite locally if CI doesn't give you enough confidence on its own.
+
 ## Reporting Issues
 
 If you find a bug or want to propose a feature, open an issue with:
