@@ -46,6 +46,14 @@ pub const PERSISTENT_MAX_BUMP_AMOUNT: u32 = 150 * DAY_IN_LEDGERS;
 /// Approximate seconds per ledger, used to convert intervals to ledgers.
 pub const SECONDS_PER_LEDGER: u64 = 5;
 
+/// Maximum lifetime of an admin proposal, in seconds.
+///
+/// `propose_admin_action` stamps `expires_at` with
+/// `created_at + ADMIN_PROPOSAL_TTL_SECONDS`, and `execute_admin_action`
+/// rejects execution once the ledger timestamp passes it, so a stale or
+/// contested proposal can never be executed months after it was created.
+pub const ADMIN_PROPOSAL_TTL_SECONDS: u64 = 7 * 86_400;
+
 /// Extends the TTL of one persistent entry to [`PERSISTENT_BUMP_AMOUNT`] when it
 /// has fallen below [`PERSISTENT_LIFETIME_THRESHOLD`]. The key must exist:
 /// the host rejects extending an absent entry.
@@ -175,10 +183,20 @@ pub struct AdminProposal {
     pub id: u64,
     pub action: AdminAction,
     pub proposer: Address,
+    /// Cached count of approvals as of the most recent `approve_admin_action`.
+    /// Advisory only: `execute_admin_action` recounts approvals from the
+    /// *current* admin set instead of trusting this number, because an
+    /// approving admin may have been removed since (or may hold a
+    /// compromised key that was rotated out).
     pub approvals_count: u32,
     pub created_at: u64,
     pub eta: u64,
+    /// Unix timestamp after which the proposal can no longer be executed
+    /// (`created_at + ADMIN_PROPOSAL_TTL_SECONDS`).
+    pub expires_at: u64,
     pub executed: bool,
+    /// Set by `cancel_admin_action`; a cancelled proposal can never execute.
+    pub cancelled: bool,
 }
 
 #[cfg(test)]
