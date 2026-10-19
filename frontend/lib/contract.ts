@@ -7,6 +7,7 @@ const RPC_URL =
   process.env.NEXT_PUBLIC_SOROBAN_RPC_URL || 'https://soroban-testnet.stellar.org';
 const CONTRACT_ID = process.env.NEXT_PUBLIC_DONATION_CONTRACT_ID;
 const NETWORK_PASSPHRASE = StellarSdk.Networks.TESTNET;
+const FRIENDBOT_URL = 'https://friendbot.stellar.org';
 // Stellar's network targets a ~5s ledger close time; used only to translate
 // a subscription's charge interval into an approval expiration window.
 const APPROX_SECONDS_PER_LEDGER = 5;
@@ -44,7 +45,8 @@ export type OnStatus = (status: ContractCallStatus) => void;
 // - 'wallet'     wallet not connected / user rejected or failed to sign
 // - 'simulation' bad input, insufficient balance, contract precondition failure
 // - 'network'    RPC/network unreachable, submission or confirmation failure
-export type DonationErrorType = 'wallet' | 'simulation' | 'network';
+// - 'unfunded'   account does not exist on the ledger (needs Friendbot on testnet)
+export type DonationErrorType = 'wallet' | 'simulation' | 'network' | 'unfunded' | 'reset';
 
 export class DonationError extends Error {
   type: DonationErrorType;
@@ -113,6 +115,15 @@ async function callContract({
   try {
     account = await server.getAccount(signerAddress);
   } catch (err) {
+    // Detect 404 / not found errors which indicate an unfunded account
+    const message = (err as Error)?.message || '';
+    if (/not found|404|account does not exist/i.test(message)) {
+      throw new DonationError(
+        'unfunded',
+        'Your wallet is not funded on the network yet. Use Friendbot to fund it on Testnet.',
+        err
+      );
+    }
     throw new DonationError(
       'network',
       'Could not load your account from the Stellar network. Check your connection and try again.',
@@ -141,11 +152,19 @@ async function callContract({
   try {
     prepared = await server.prepareTransaction(tx);
   } catch (err) {
-    const message = /insufficient|underfunded/i.test((err as Error)?.message || '')
+    const message = (err as Error)?.message || '';
+    // Detect missing contract or entry errors (testnet reset)
+    if (/not found|no such contract|entry not found|missing contract/i.test(message)) {
+      throw new DonationError(
+        'reset',
+        'The Testnet was reset. This demo is being redeployed. Please try again later.',
+        err
+      );
+    }
+    const simMessage = /insufficient|underfunded/i.test(message)
       ? 'Insufficient balance or allowance to complete this action.'
-      : (err as Error)?.message ||
-        'The transaction could not be simulated. Check the amount and try again.';
-    throw new DonationError('simulation', message, err);
+      : message || 'The transaction could not be simulated. Check the amount and try again.';
+    throw new DonationError('simulation', simMessage, err);
   }
 
   onStatus?.('awaiting-signature');
@@ -488,4 +507,24 @@ export async function cancelSubscription({
   });
 
   return { hash };
+}
+
+/**
+ * Funds a wallet address on Testnet using Friendbot. Only works on Testnet.
+ * Throws an error if the network is not Testnet or if the request fails.
+ */
+export async function fundWithFriendbot(address: string): Promise<void> {
+  if (NETWORK_PASSPHRASE !== StellarSdk.Networks.TESTNET) {
+    throw new DonationError('network', 'Friendbot is only available on Testnet.');
+  }
+
+  try {
+    const response = await fetch(`${FRIENDBOT_URL}?addr=${encodeURIComponent(address)}`);
+    if (!response.ok) {
+      const text = await response.text();
+      throw new Error(`Friendbot request failed: ${text}`);
+    }
+  } catch (err) {
+    throw new DonationError('network', 'Failed to fund wallet with Friendbot. Please try again.', err);
+  }
 }
