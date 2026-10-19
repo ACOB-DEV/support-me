@@ -88,7 +88,7 @@ function errorCauseMessage(error: unknown): string {
 export class SubscriptionExecutor {
   private keypair: Keypair | null = null;
   private timer: ReturnType<typeof setInterval> | null = null;
-  private running = false;
+  public running = false;
 
   start(): void {
     const donationContractId = getDonationContractId();
