@@ -32,6 +32,7 @@
 use common::{
     extend_instance_ttl, extend_persistent_ttl, extend_subscription_ttl, validate_admin_set,
     AdminAction, AdminProposal, CreatorProfile, DonationRecord, Subscription,
+    ADMIN_PROPOSAL_TTL_SECONDS,
 };
 use soroban_sdk::{
     contract, contracterror, contractevent, contractimpl, symbol_short, token, Address, Env,
@@ -47,6 +48,7 @@ const TIMELOCK_DELAY_KEY: Symbol = symbol_short!("delay");
 const PROPOSAL_COUNTER_KEY: Symbol = symbol_short!("prop_ctr");
 const PROPOSAL_KEY: Symbol = symbol_short!("proposal");
 const APPROVAL_KEY: Symbol = symbol_short!("approval");
+const CANCEL_KEY: Symbol = symbol_short!("cancel");
 const PAUSED_KEY: Symbol = symbol_short!("paused");
 const REGISTRY_KEY: Symbol = symbol_short!("registry");
 const SUBSCRIPTIONS_KEY: Symbol = symbol_short!("subs");
@@ -127,6 +129,16 @@ pub struct ProposalExecutedEvent {
     pub proposal_id: u64,
     #[topic]
     pub executor: Address,
+}
+
+/// Emitted when an admin proposal is cancelled — either unilaterally by its
+/// proposer or after `threshold` current admins requested the cancellation.
+#[contractevent(topics = ["prop_cancelled"])]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct ProposalCancelledEvent {
+    pub proposal_id: u64,
+    #[topic]
+    pub cancelled_by: Address,
 }
 
 #[contractevent(topics = ["goal_upd"])]
@@ -211,6 +223,31 @@ impl DonationContract {
         Self::contains_address(&admins, &address)
     }
 
+    /// Recounts `key` votes for `proposal_id` against the *current* admin set
+    /// (`ADMINS_KEY`), so approvals (or cancellation requests) cast by an
+    /// admin who has since been removed no longer count toward the threshold.
+    /// Used at execution instead of trusting the cached `approvals_count`.
+    fn count_current_admin_votes(env: &Env, key: Symbol, proposal_id: u64) -> u32 {
+        let admins: Vec<Address> = env
+            .storage()
+            .instance()
+            .get(&ADMINS_KEY)
+            .unwrap_or_else(|| Vec::new(env));
+        let mut votes: u32 = 0;
+        for i in 0..admins.len() {
+            let admin = admins.get(i).unwrap();
+            let voted: bool = env
+                .storage()
+                .persistent()
+                .get(&(key.clone(), proposal_id, admin))
+                .unwrap_or(false);
+            if voted {
+                votes = votes.checked_add(1).expect("vote count overflow");
+            }
+        }
+        votes
+    }
+
     /// Returns whether contract transfers/operations are currently paused.
     pub fn is_paused(env: Env) -> bool {
         env.storage().instance().get(&PAUSED_KEY).unwrap_or(false)
@@ -245,6 +282,9 @@ impl DonationContract {
             .unwrap_or(0);
         let now = env.ledger().timestamp();
         let eta = now.checked_add(timelock).expect("proposal eta overflow");
+        let expires_at = now
+            .checked_add(ADMIN_PROPOSAL_TTL_SECONDS)
+            .expect("proposal expiry overflow");
 
         let proposal = AdminProposal {
             id: prop_id,
@@ -253,7 +293,9 @@ impl DonationContract {
             approvals_count: 1,
             created_at: now,
             eta,
+            expires_at,
             executed: false,
+            cancelled: false,
         };
 
         env.storage()
@@ -319,6 +361,65 @@ impl DonationContract {
         .publish(&env);
     }
 
+    /// Cancels an administrative proposal before it is executed. The proposer
+    /// can cancel their own proposal unilaterally. Any other caller must be a
+    /// current admin: each such admin records a cancellation request, counted
+    /// against the *current* admin set exactly like approvals (requests from
+    /// since-removed admins do not count), and the proposal is marked
+    /// cancelled once `threshold` requests have been reached. Emits
+    /// [`ProposalCancelledEvent`] when the proposal is marked cancelled.
+    pub fn cancel_admin_action(env: Env, caller: Address, proposal_id: u64) {
+        caller.require_auth();
+        let mut proposal: AdminProposal = env
+            .storage()
+            .persistent()
+            .get(&(PROPOSAL_KEY, proposal_id))
+            .expect("proposal not found");
+        assert!(!proposal.executed, "proposal already executed");
+        assert!(!proposal.cancelled, "proposal already cancelled");
+        extend_instance_ttl(&env);
+
+        if caller != proposal.proposer {
+            assert!(
+                Self::is_admin(env.clone(), caller.clone()),
+                "only the proposer or an admin can cancel a proposal"
+            );
+            let already_requested: bool = env
+                .storage()
+                .persistent()
+                .get(&(CANCEL_KEY, proposal_id, caller.clone()))
+                .unwrap_or(false);
+            assert!(
+                !already_requested,
+                "admin has already requested cancellation"
+            );
+            env.storage()
+                .persistent()
+                .set(&(CANCEL_KEY, proposal_id, caller.clone()), &true);
+
+            let requests = Self::count_current_admin_votes(&env, CANCEL_KEY, proposal_id);
+            let threshold: u32 = env
+                .storage()
+                .instance()
+                .get(&THRESHOLD_KEY)
+                .expect("threshold not set");
+            if requests < threshold {
+                return;
+            }
+        }
+
+        proposal.cancelled = true;
+        env.storage()
+            .persistent()
+            .set(&(PROPOSAL_KEY, proposal_id), &proposal);
+
+        ProposalCancelledEvent {
+            proposal_id,
+            cancelled_by: caller,
+        }
+        .publish(&env);
+    }
+
     /// Executes an administrative proposal once signature threshold & timelock criteria are met.
     pub fn execute_admin_action(env: Env, executor: Address, proposal_id: u64) {
         executor.require_auth();
@@ -333,14 +434,20 @@ impl DonationContract {
             .get(&(PROPOSAL_KEY, proposal_id))
             .expect("proposal not found");
         assert!(!proposal.executed, "proposal already executed");
+        assert!(!proposal.cancelled, "proposal has been cancelled");
 
         let threshold: u32 = env
             .storage()
             .instance()
             .get(&THRESHOLD_KEY)
             .expect("threshold not set");
+        // Recount approvals from the current admin set: the cached
+        // `approvals_count` may include votes from an admin who has since
+        // been removed (e.g. after a key compromise), and those must not
+        // tip the proposal over the threshold.
+        let approvals = Self::count_current_admin_votes(&env, APPROVAL_KEY, proposal_id);
         assert!(
-            proposal.approvals_count >= threshold,
+            approvals >= threshold,
             "insufficient signatures to execute proposal"
         );
 
@@ -349,6 +456,7 @@ impl DonationContract {
             now >= proposal.eta,
             "proposal timelock delay has not elapsed"
         );
+        assert!(now <= proposal.expires_at, "proposal has expired");
         extend_instance_ttl(&env);
 
         match proposal.action.clone() {
@@ -2387,5 +2495,145 @@ mod tests {
         let env = Env::default();
         let (_admin, donation_client, _registry_client) = setup(&env);
         donation_client.bump_subscription(&99);
+    }
+
+    #[test]
+    fn test_expired_proposal_cannot_execute() {
+        let env = Env::default();
+        env.mock_all_auths_allowing_non_root_auth();
+        let (admin, donation_client, _registry_client) = setup(&env);
+
+        let target = Address::generate(&env);
+        let prop_id =
+            donation_client.propose_admin_action(&admin, &AdminAction::SetDonationContract(target));
+
+        let prop = donation_client.get_proposal(&prop_id).unwrap();
+        assert_eq!(prop.created_at, 0);
+        assert_eq!(prop.expires_at, ADMIN_PROPOSAL_TTL_SECONDS);
+        assert!(!prop.executed);
+
+        // Well past the proposal's 7-day lifetime. The timelock (0) is long
+        // satisfied, so expiry is the only gate that can refuse execution.
+        env.ledger()
+            .with_mut(|li| li.timestamp = ADMIN_PROPOSAL_TTL_SECONDS + 1);
+
+        assert!(donation_client
+            .try_execute_admin_action(&admin, &prop_id)
+            .is_err());
+        assert!(!donation_client.get_proposal(&prop_id).unwrap().executed);
+    }
+
+    #[test]
+    fn test_cancelled_proposal_cannot_execute() {
+        let env = Env::default();
+        env.mock_all_auths_allowing_non_root_auth();
+        let (admin, donation_client, _registry_client) = setup(&env);
+
+        let target = Address::generate(&env);
+        let prop_id =
+            donation_client.propose_admin_action(&admin, &AdminAction::SetDonationContract(target));
+
+        donation_client.cancel_admin_action(&admin, &prop_id);
+
+        let prop = donation_client.get_proposal(&prop_id).unwrap();
+        assert!(prop.cancelled);
+        assert!(!prop.executed);
+
+        // Even after the timelock passes, a cancelled proposal must never execute.
+        env.ledger().with_mut(|li| li.timestamp = 10);
+        assert!(donation_client
+            .try_execute_admin_action(&admin, &prop_id)
+            .is_err());
+        let prop_after = donation_client.get_proposal(&prop_id).unwrap();
+        assert!(prop_after.cancelled);
+        assert!(!prop_after.executed);
+    }
+
+    #[test]
+    fn test_cancel_requires_threshold_of_non_proposer_admins() {
+        let env = Env::default();
+        env.mock_all_auths_allowing_non_root_auth();
+
+        let admin1 = Address::generate(&env);
+        let admin2 = Address::generate(&env);
+        let admin3 = Address::generate(&env);
+
+        let mut admins = Vec::new(&env);
+        admins.push_back(admin1.clone());
+        admins.push_back(admin2.clone());
+        admins.push_back(admin3.clone());
+
+        // 2-of-3 threshold, zero timelock.
+        let (donation_client, _registry_client) = deploy_pair(&env, admins, 2, 0);
+
+        let target = Address::generate(&env);
+        let prop_id = donation_client
+            .propose_admin_action(&admin1, &AdminAction::SetDonationContract(target));
+
+        // A single non-proposer request (1 < threshold 2) is recorded only.
+        donation_client.cancel_admin_action(&admin2, &prop_id);
+        assert!(!donation_client.get_proposal(&prop_id).unwrap().cancelled);
+
+        // The second request reaches the threshold: the proposal is cancelled.
+        donation_client.cancel_admin_action(&admin3, &prop_id);
+        let prop = donation_client.get_proposal(&prop_id).unwrap();
+        assert!(prop.cancelled);
+        assert!(!prop.executed);
+    }
+
+    #[test]
+    fn test_approval_from_removed_admin_does_not_count() {
+        let env = Env::default();
+        env.mock_all_auths_allowing_non_root_auth();
+
+        let admin1 = Address::generate(&env);
+        let admin2 = Address::generate(&env);
+        let admin3 = Address::generate(&env);
+        let executor = Address::generate(&env);
+
+        let mut admins = Vec::new(&env);
+        admins.push_back(admin1.clone());
+        admins.push_back(admin2.clone());
+        admins.push_back(admin3.clone());
+
+        // 2-of-3 threshold, 10 second timelock.
+        let (donation_client, _registry_client) = deploy_pair(&env, admins, 2, 10);
+
+        // Proposal 0 collects approvals from admin1 and admin3, so the cached
+        // count already equals the threshold.
+        let prop0 = donation_client
+            .propose_admin_action(&admin1, &AdminAction::SetExecutor(executor.clone()));
+        donation_client.approve_admin_action(&admin3, &prop0);
+        assert_eq!(
+            donation_client
+                .get_proposal(&prop0)
+                .unwrap()
+                .approvals_count,
+            2
+        );
+
+        // Proposal 1 removes admin3 and is approved by admin1 + admin2.
+        let prop1 = donation_client
+            .propose_admin_action(&admin1, &AdminAction::RemoveAdmin(admin3.clone()));
+        donation_client.approve_admin_action(&admin2, &prop1);
+
+        env.ledger().with_mut(|li| li.timestamp = 20);
+        donation_client.execute_admin_action(&admin1, &prop1);
+        assert!(!donation_client.is_admin(&admin3));
+
+        // admin3's stale approval on proposal 0 no longer counts: the recount
+        // sees only admin1, which is below the 2-of-3 threshold, so execution
+        // is refused even though `approvals_count` says 2.
+        assert!(donation_client
+            .try_execute_admin_action(&admin1, &prop0)
+            .is_err());
+        let prop0_after = donation_client.get_proposal(&prop0).unwrap();
+        assert!(!prop0_after.executed);
+        assert_eq!(prop0_after.approvals_count, 2);
+
+        // A current admin's approval lifts the recount to the threshold.
+        donation_client.approve_admin_action(&admin2, &prop0);
+        donation_client.execute_admin_action(&admin1, &prop0);
+        assert!(donation_client.get_proposal(&prop0).unwrap().executed);
     }
 }
