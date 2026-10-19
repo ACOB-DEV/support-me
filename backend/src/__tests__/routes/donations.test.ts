@@ -23,7 +23,9 @@ jest.mock("../../prisma", () => ({
     },
     goal: {
       findMany: jest.fn(),
+      findUnique: jest.fn(),
       update: jest.fn(),
+      updateMany: jest.fn(),
     },
     $transaction: jest.fn(),
   },
@@ -49,7 +51,7 @@ const mockedPrisma = prisma as unknown as {
     delete: jest.Mock;
     create: jest.Mock;
   };
-  goal: { findMany: jest.Mock; update: jest.Mock };
+  goal: { findMany: jest.Mock; findUnique: jest.Mock; update: jest.Mock; updateMany: jest.Mock };
   $transaction: jest.Mock;
 };
 
@@ -324,8 +326,21 @@ describe("POST /api/donations", () => {
     // active, currency-matching goals should be findMany'd/updated.
     const activeGoalXlm = { id: 1, creatorId: 7, currency: "XLM", currentAmount: 5, targetAmount: 100, recurring: false, status: "ACTIVE" };
     const activeGoalXlm2 = { id: 2, creatorId: 7, currency: "XLM", currentAmount: 95, targetAmount: 100, recurring: false, status: "ACTIVE" };
-    mockedPrisma.goal.findMany.mockResolvedValue([activeGoalXlm, activeGoalXlm2]);
-    mockedPrisma.goal.update.mockResolvedValue({});
+    const goals = [activeGoalXlm, activeGoalXlm2];
+    mockedPrisma.goal.findMany.mockResolvedValue(goals);
+    // Claim (below-target guard) matches both fixtures; only goal 2 is at
+    // or above its target when re-checked for the COMPLETED flip.
+    mockedPrisma.goal.updateMany.mockImplementation(async ({ where, data }) => {
+      const goal = goals.find((g) => g.id === where.id);
+      if (where.currentAmount?.lt !== undefined) {
+        return { count: goal && goal.currentAmount < where.currentAmount.lt ? 1 : 0 };
+      }
+      if (data.status === "COMPLETED") return { count: 1 };
+      return { count: 0 };
+    });
+    mockedPrisma.goal.findUnique.mockImplementation(async ({ where }) =>
+      where.id === 2 ? { ...activeGoalXlm2, currentAmount: 105 } : { ...activeGoalXlm }
+    );
 
     const res = await request(app).post("/api/donations").set("Idempotency-Key", "donation-goal-1").send({
       creatorUsername: "bob",
@@ -339,17 +354,22 @@ describe("POST /api/donations", () => {
     expect(mockedPrisma.goal.findMany).toHaveBeenCalledWith({
       where: { creatorId: 7, currency: "XLM", status: "ACTIVE" },
     });
-    // Full donation amount applied to EACH matching goal, not split between
-    // them — see the design-decision comment in services/goalService.ts.
-    expect(mockedPrisma.goal.update).toHaveBeenCalledWith({
-      where: { id: 1 },
-      data: { currentAmount: 15 },
+    // Full donation amount applied to EACH matching goal via an atomic
+    // increment, not split between them and not computed from a stale read
+    // (issue #262) — see the design-decision comment in services/goalService.ts.
+    expect(mockedPrisma.goal.updateMany).toHaveBeenCalledWith({
+      where: { id: 1, status: "ACTIVE", currentAmount: { lt: 100 } },
+      data: { currentAmount: { increment: 10 } },
     });
     // This goal crosses its target (95 + 10 = 105 >= 100) and isn't
-    // recurring, so it also flips to COMPLETED.
-    expect(mockedPrisma.goal.update).toHaveBeenCalledWith({
-      where: { id: 2 },
-      data: { currentAmount: 105, status: "COMPLETED" },
+    // recurring, so the conditional ACTIVE → COMPLETED flip also runs.
+    expect(mockedPrisma.goal.updateMany).toHaveBeenCalledWith({
+      where: { id: 2, status: "ACTIVE", currentAmount: { lt: 100 } },
+      data: { currentAmount: { increment: 10 } },
+    });
+    expect(mockedPrisma.goal.updateMany).toHaveBeenCalledWith({
+      where: { id: 2, status: "ACTIVE" },
+      data: { status: "COMPLETED" },
     });
   });
 
@@ -359,7 +379,12 @@ describe("POST /api/donations", () => {
     mockedPrisma.donation.upsert.mockResolvedValue({ id: 1, creatorId: 7, amount: 10, currency: "XLM" });
     const goal = { id: 2, creatorId: 7, title: "New mic", currency: "XLM", currentAmount: 95, targetAmount: 100, recurring: false, status: "ACTIVE" };
     mockedPrisma.goal.findMany.mockResolvedValue([goal]);
-    mockedPrisma.goal.update.mockResolvedValue({ ...goal, currentAmount: 105, status: "COMPLETED" });
+    mockedPrisma.goal.updateMany.mockImplementation(async ({ where, data }) => {
+      if (where.currentAmount?.lt !== undefined) return { count: 1 };
+      if (data.status === "COMPLETED") return { count: 1 };
+      return { count: 0 };
+    });
+    mockedPrisma.goal.findUnique.mockResolvedValue({ ...goal, currentAmount: 105 });
 
     const res = await request(app).post("/api/donations").set("Idempotency-Key", "donation-goal-reached").send({
       creatorUsername: "bob",
@@ -396,7 +421,10 @@ describe("POST /api/donations", () => {
       status: "ACTIVE",
     };
     mockedPrisma.goal.findMany.mockResolvedValue([activeGoalUsdt]);
-    mockedPrisma.goal.update.mockResolvedValue({});
+    // The claim matches (0 < 100) and the increment lands below the target,
+    // so no COMPLETED flip follows and the goal simply keeps accumulating.
+    mockedPrisma.goal.updateMany.mockResolvedValue({ count: 1 });
+    mockedPrisma.goal.findUnique.mockResolvedValue({ ...activeGoalUsdt, currentAmount: 25 });
 
     const res = await request(app).post("/api/donations").set("Idempotency-Key", "donation-usdt-1").send({
       creatorUsername: "bob",
@@ -422,9 +450,9 @@ describe("POST /api/donations", () => {
     expect(mockedPrisma.goal.findMany).toHaveBeenCalledWith({
       where: { creatorId: 7, currency: "USDT", status: "ACTIVE" },
     });
-    expect(mockedPrisma.goal.update).toHaveBeenCalledWith({
-      where: { id: 3 },
-      data: { currentAmount: 25 },
+    expect(mockedPrisma.goal.updateMany).toHaveBeenCalledWith({
+      where: { id: 3, status: "ACTIVE", currentAmount: { lt: 100 } },
+      data: { currentAmount: { increment: 25 } },
     });
   });
 
@@ -445,6 +473,7 @@ describe("POST /api/donations", () => {
     });
 
     expect(mockedPrisma.goal.update).not.toHaveBeenCalled();
+    expect(mockedPrisma.goal.updateMany).not.toHaveBeenCalled();
   });
 
   describe("donation notifications (#17)", () => {

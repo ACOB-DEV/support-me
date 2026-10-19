@@ -58,30 +58,66 @@ export async function applyDonationToGoals(
 /**
  * Increments one goal's progress and flips it to COMPLETED once it reaches its target (non-recurring goals only — a recurring goal keeps accepting donations until its period resets, see goalResetScheduler.ts).
  * Returns the updated goal if this donation is the one that reached the target, otherwise null.
+ *
+ * Issue #262: this used to compute `goal.currentAmount + amount` in JS from
+ * the value read by applyDonationToGoals's findMany and write the absolute
+ * result back — two concurrent donations would both start from the same
+ * stale `currentAmount` and the second write would silently erase the first
+ * (lost update). The increment is now applied by the database relative to
+ * the current row value, inside a guarded conditional update so that of any
+ * number of concurrent donations, exactly one "claims" the below-target →
+ * at-or-above-target crossing (Postgres re-evaluates the WHERE clause after
+ * the row lock is released, so a loser of the race sees the winner's new
+ * value and matches zero rows).
  */
 async function applyAmountToGoal(
   client: Prisma.TransactionClient,
   goal: Goal,
   amount: number
 ): Promise<Goal | null> {
-  const newAmount = goal.currentAmount + amount;
-  const reachedTarget = newAmount >= goal.targetAmount;
-  // A recurring goal stays ACTIVE past its target, so only the donation that
-  // crosses it counts as reaching it — later ones in the same period don't.
-  const justReached = reachedTarget && (!goal.recurring || goal.currentAmount < goal.targetAmount);
-
-  const updated = await client.goal.update({
-    where: { id: goal.id },
-    data: {
-      currentAmount: newAmount,
-      // A recurring goal stays ACTIVE even after reaching its target —
-      // "completed" isn't a meaningful end state for something that resets
-      // on a schedule; it just keeps accumulating until the next period.
-      ...(reachedTarget && !goal.recurring ? { status: "COMPLETED" as const } : {}),
+  // Claim + increment in one atomic statement: only while the goal is still
+  // ACTIVE and below its target. The amount is added by the database, never
+  // computed from a possibly-stale read.
+  const claimed = await client.goal.updateMany({
+    where: {
+      id: goal.id,
+      status: "ACTIVE",
+      currentAmount: { lt: goal.targetAmount },
     },
+    data: { currentAmount: { increment: amount } },
   });
 
-  return justReached ? updated : null;
+  if (claimed.count === 0) {
+    // The goal was already at/above its target when this donation arrived
+    // (a later donation in the same period, or a concurrent donation already
+    // carried it over) — still apply the amount so no progress is lost,
+    // just without reporting a "reached" event.
+    await client.goal.update({
+      where: { id: goal.id },
+      data: { currentAmount: { increment: amount } },
+    });
+    return null;
+  }
+
+  const updated = await client.goal.findUnique({ where: { id: goal.id } });
+  // The increment alone didn't carry the goal to its target.
+  if (!updated || updated.currentAmount < goal.targetAmount) return null;
+
+  if (goal.recurring) {
+    // A recurring goal stays ACTIVE past its target — "completed" isn't a
+    // meaningful end state for something that resets on a schedule; it just
+    // keeps accumulating until the next period. The claim guard above means
+    // only the crossing donation reports it as reached.
+    return updated;
+  }
+
+  // Flip to COMPLETED conditionally so this can happen at most once: only
+  // the first donation to flip ACTIVE → COMPLETED counts as "reached".
+  const flipped = await client.goal.updateMany({
+    where: { id: goal.id, status: "ACTIVE" },
+    data: { status: "COMPLETED" },
+  });
+  return flipped.count === 1 ? { ...updated, status: "COMPLETED" as const } : null;
 }
 
 const INTERVAL_MS: Record<RecurrenceInterval, number> = {
@@ -100,21 +136,31 @@ export async function resetDueGoals(now: Date = new Date()): Promise<number> {
     where: { recurring: true, currentPeriodEnd: { lte: now } },
   });
 
+  let resetCount = 0;
   for (const goal of due) {
     // recurrenceInterval is guaranteed non-null whenever recurring is true
     // (enforced by the create/update schemas), but Prisma's generated type
     // still models it as nullable — fall back to MONTHLY defensively rather
     // than throwing and skipping the reset entirely.
     const interval = goal.recurrenceInterval ?? "MONTHLY";
-    await prisma.goal.update({
-      where: { id: goal.id },
+    // Guard the reset with the same due-condition the findMany used (issue
+    // #262): a second scheduler tick that raced this one re-checks the
+    // condition after taking the row lock, finds currentPeriodEnd already
+    // rolled forward, and matches zero rows — the period can't advance
+    // twice. An in-flight donation increment racing here is relative, so it
+    // either lands before the reset (zeroed, as intended) or after it
+    // (counts toward the fresh period) instead of overwriting the reset
+    // with a stale absolute value.
+    const result = await prisma.goal.updateMany({
+      where: { id: goal.id, recurring: true, currentPeriodEnd: { lte: now } },
       data: {
         currentAmount: 0,
         status: "ACTIVE",
         currentPeriodEnd: computePeriodEnd(interval, now),
       },
     });
+    resetCount += result.count;
   }
 
-  return due.length;
+  return resetCount;
 }
