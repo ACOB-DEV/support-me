@@ -6,6 +6,8 @@ import { useAuth } from '@/context/AuthContext';
 import { ProtectedRoute } from '@/components/ProtectedRoute';
 import { API_URL } from '@/lib/api';
 
+const SITE_URL = process.env.NEXT_PUBLIC_SITE_URL || 'https://support-mee.vercel.app';
+
 export default function CreateUsernamePage() {
   const [username, setUsername] = useState('');
   const [displayName, setDisplayName] = useState('');
@@ -30,6 +32,11 @@ export default function CreateUsernamePage() {
 
     if (!/^[a-zA-Z0-9_-]+$/.test(username)) {
       setError('Username can only contain letters, numbers, underscores, and hyphens');
+      return;
+    }
+
+    if (username.length > 30) {
+      setError('Username must be 30 characters or fewer');
       return;
     }
 
@@ -74,38 +81,43 @@ export default function CreateUsernamePage() {
             </div>
 
             {error && (
-              <div className="card-brutal bg-brand-pink p-4 mb-6 text-sm text-ink font-bold">
+              <div role="alert" className="card-brutal bg-brand-pink p-4 mb-6 text-sm text-ink font-bold">
                 {error}
               </div>
             )}
 
             <form onSubmit={handleSubmit} className="space-y-4">
               <div>
-                <label className="block text-sm font-bold text-ink mb-1">
+                <label htmlFor="username" className="block text-sm font-bold text-ink mb-1">
                   Username
                 </label>
                 <div className="flex items-center">
                   <span className="text-muted px-4 py-3 bg-accent-bg border-2 border-r-0 border-ink rounded-l-xl text-sm font-bold">
-                    support-mee.vercel.app/
+                    {SITE_URL.replace(/\/$/, '')}/
                   </span>
                   <input
+                    id="username"
                     type="text"
                     value={username}
                     onChange={(e) => setUsername(e.target.value.toLowerCase())}
                     placeholder="yourname"
+                    maxLength={30}
+                    aria-invalid={error ? true : undefined}
+                    aria-describedby="username-hint"
                     className="input-brutal flex-1 rounded-l-none border-l-0"
                   />
                 </div>
-                <p className="text-xs text-muted mt-2 font-medium">
-                  Letters, numbers, underscores, and hyphens only (3+ characters)
+                <p id="username-hint" className="text-xs text-muted mt-2 font-medium">
+                  Letters, numbers, underscores, and hyphens only (3–30 characters)
                 </p>
               </div>
 
               <div>
-                <label className="block text-sm font-bold text-ink mb-1">
+                <label htmlFor="display-name" className="block text-sm font-bold text-ink mb-1">
                   Display Name (Optional)
                 </label>
                 <input
+                  id="display-name"
                   type="text"
                   value={displayName}
                   onChange={(e) => setDisplayName(e.target.value)}
@@ -124,7 +136,7 @@ export default function CreateUsernamePage() {
             </form>
 
             <p className="text-center text-muted text-xs mt-6 font-medium">
-              You can change this later in your settings
+              Pick carefully — your username becomes your public profile URL
             </p>
           </div>
         </div>
