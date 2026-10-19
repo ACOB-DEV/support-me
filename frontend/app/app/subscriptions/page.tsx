@@ -42,6 +42,7 @@ function SubscriptionsList() {
   const [loading, setLoading] = useState(true);
   const [cancellingId, setCancellingId] = useState<number | null>(null);
   const [subscriptionToCancel, setSubscriptionToCancel] = useState<Subscription | null>(null);
+  const [subscriptionToRemove, setSubscriptionToRemove] = useState<Subscription | null>(null);
 
   useEffect(() => {
     if (!user?.walletAddress) return;
@@ -86,9 +87,37 @@ function SubscriptionsList() {
         });
       }
     } catch (err) {
-      notify.error('Could not cancel subscription', err);
+      const message = (err as Error)?.message || '';
+      // Detect testnet reset errors (contract/subscription not found)
+      if (/not found|no such contract|entry not found|missing contract/i.test(message)) {
+        setSubscriptionToRemove(subscription);
+        notify.warning('Subscription no longer exists on-chain', {
+          description: 'This subscription was lost during a Testnet reset. You can remove it from your records.',
+        });
+      } else {
+        notify.error('Could not cancel subscription', err);
+      }
     } finally {
       setCancellingId(null);
+    }
+  };
+
+  const handleRemoveStaleRecord = async (subscription: Subscription) => {
+    try {
+      const recordRes = await fetchWithRetry(`${API_URL}/api/subscriptions/${subscription.id}/cancel`, {
+        method: 'POST',
+        headers: { Authorization: `Bearer ${token}` },
+      });
+      if (recordRes?.ok) {
+        setSubscriptions((prev) => prev.filter((s) => s.id !== subscription.id));
+        notify.success('Stale subscription removed');
+      } else {
+        notify.error('Could not remove subscription');
+      }
+    } catch (err) {
+      notify.error('Could not remove subscription', err);
+    } finally {
+      setSubscriptionToRemove(null);
     }
   };
 
@@ -178,6 +207,23 @@ function SubscriptionsList() {
           if (subscription) handleCancel(subscription);
         }}
         onCancel={() => setSubscriptionToCancel(null)}
+      />
+
+      <ConfirmDialog
+        open={subscriptionToRemove !== null}
+        title="Remove stale subscription?"
+        description={
+          subscriptionToRemove &&
+          `This subscription to ${subscriptionToRemove.creator.displayName || subscriptionToRemove.creator.username} no longer exists on-chain (likely due to a Testnet reset). Remove it from your records?`
+        }
+        confirmLabel="Remove"
+        cancelLabel="Keep"
+        onConfirm={() => {
+          const subscription = subscriptionToRemove;
+          setSubscriptionToRemove(null);
+          if (subscription) handleRemoveStaleRecord(subscription);
+        }}
+        onCancel={() => setSubscriptionToRemove(null)}
       />
     </div>
   );

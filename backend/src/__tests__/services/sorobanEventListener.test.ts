@@ -9,24 +9,98 @@ import {
   SUBSCRIPTION_CANCELLED_EVENT,
   GOAL_UPDATED_EVENT,
   DONATION_RECORDED_EVENT,
+  DonationEvent,
+  SubscriptionCreatedEvent,
+  SubscriptionCancelledEvent,
+  GoalUpdatedEvent,
+  DonationRecordedEvent,
 } from "../../services/eventBus";
 import prisma from "../../prisma";
-import { xdr, nativeToScVal } from "@stellar/stellar-sdk";
+import {
+  notifyDonationReceived,
+  notifyDonationConfirmation,
+  notifyGoalsReached,
+} from "../../services/donationNotifications";
+import { nativeToScVal } from "@stellar/stellar-sdk";
 
-jest.mock("../../prisma", () => ({
-  __esModule: true,
-  default: {
+// Donation/goal notifications are fire-and-forget (setImmediate) and hit the
+// mailer + extra Prisma lookups; stub them so reconciliation tests stay
+// synchronous and deterministic.
+jest.mock("../../services/donationNotifications", () => ({
+  notifyDonationReceived: jest.fn().mockResolvedValue(false),
+  notifyDonationConfirmation: jest.fn().mockResolvedValue(false),
+  notifyGoalsReached: jest.fn().mockResolvedValue(undefined),
+}));
+
+jest.mock("../../prisma", () => {
+  // Kept separate from the outer object so `$transaction`'s callback type can
+  // reference it without creating a circular `typeof` self-reference.
+  const transactionClient = {
     subscription: {
       updateMany: jest.fn().mockResolvedValue({ count: 1 }),
     },
     creator: {
       updateMany: jest.fn().mockResolvedValue({ count: 1 }),
+      findFirst: jest.fn(),
     },
-  },
-}));
+    donation: {
+      findFirst: jest.fn(),
+      findUniqueOrThrow: jest.fn(),
+      updateMany: jest.fn(),
+      create: jest.fn(),
+    },
+    goal: {
+      findMany: jest.fn().mockResolvedValue([]),
+      update: jest.fn(),
+    },
+  };
+  const prismaMock = {
+    ...transactionClient,
+    $transaction: jest.fn((callback: (client: typeof transactionClient) => unknown) =>
+      callback(transactionClient)
+    ),
+  };
+  return { __esModule: true, default: prismaMock };
+});
 
 function toBase64Xdr(val: unknown): string {
   return nativeToScVal(val).toXDR("base64");
+}
+
+const mockedPrisma = prisma as unknown as {
+  creator: { findFirst: jest.Mock };
+  donation: {
+    findFirst: jest.Mock;
+    findUniqueOrThrow: jest.Mock;
+    updateMany: jest.Mock;
+    create: jest.Mock;
+  };
+  goal: { findMany: jest.Mock; update: jest.Mock };
+};
+const mockedNotifyReceived = notifyDonationReceived as jest.Mock;
+const mockedNotifyConfirmation = notifyDonationConfirmation as jest.Mock;
+const mockedNotifyGoalsReached = notifyGoalsReached as jest.Mock;
+
+/** Flushes the fire-and-forget `setImmediate` notification batch. */
+async function flushNotifications(): Promise<void> {
+  await new Promise((resolve) => setImmediate(resolve));
+  await new Promise((resolve) => setImmediate(resolve));
+}
+
+function donatedRawEvent(overrides: Partial<RawEvent> = {}): RawEvent {
+  return {
+    type: "contract",
+    ledger: 1050,
+    id: "0000000000001050-00000",
+    txHash: "tx_hash_donated_123",
+    topic: [toBase64Xdr("donated"), toBase64Xdr("GDONOR123"), toBase64Xdr("GCREATOR456")],
+    value: toBase64Xdr({
+      amount: 1500000000n,
+      memo: "Coffee for dev",
+      timestamp: 1713182400n,
+    }),
+    ...overrides,
+  };
 }
 
 describe("SorobanEventListener event processing & reconciliation", () => {
@@ -35,8 +109,9 @@ describe("SorobanEventListener event processing & reconciliation", () => {
   });
 
   it("processes 'donated' event with token and emits DONATION_EVENT", async () => {
-    const emittedEvents: any[] = [];
-    const handler = (evt: any) => emittedEvents.push(evt);
+    const warn = jest.spyOn(console, "warn").mockImplementation(() => undefined);
+    const emittedEvents: DonationEvent[] = [];
+    const handler = (evt: DonationEvent) => emittedEvents.push(evt);
     eventBus.on(DONATION_EVENT, handler);
 
     const rawEvent: RawEvent = {
@@ -129,11 +204,12 @@ describe("SorobanEventListener event processing & reconciliation", () => {
     });
 
     eventBus.off(DONATION_EVENT, handler);
+    warn.mockRestore();
   });
 
   it("processes 'subscribed' event with schedule details and emits SUBSCRIPTION_CREATED_EVENT", async () => {
-    const emittedEvents: any[] = [];
-    const handler = (evt: any) => emittedEvents.push(evt);
+    const emittedEvents: SubscriptionCreatedEvent[] = [];
+    const handler = (evt: SubscriptionCreatedEvent) => emittedEvents.push(evt);
     eventBus.on(SUBSCRIPTION_CREATED_EVENT, handler);
 
     const rawEvent: RawEvent = {
@@ -173,8 +249,8 @@ describe("SorobanEventListener event processing & reconciliation", () => {
   });
 
   it("processes 'sub_cancelled' event and reconciles database subscription state without polling", async () => {
-    const emittedEvents: any[] = [];
-    const handler = (evt: any) => emittedEvents.push(evt);
+    const emittedEvents: SubscriptionCancelledEvent[] = [];
+    const handler = (evt: SubscriptionCancelledEvent) => emittedEvents.push(evt);
     eventBus.on(SUBSCRIPTION_CANCELLED_EVENT, handler);
 
     const rawEvent: RawEvent = {
@@ -212,8 +288,8 @@ describe("SorobanEventListener event processing & reconciliation", () => {
   });
 
   it("processes 'goal_upd' event and reconciles creator donation goal in database", async () => {
-    const emittedEvents: any[] = [];
-    const handler = (evt: any) => emittedEvents.push(evt);
+    const emittedEvents: GoalUpdatedEvent[] = [];
+    const handler = (evt: GoalUpdatedEvent) => emittedEvents.push(evt);
     eventBus.on(GOAL_UPDATED_EVENT, handler);
 
     const rawEvent: RawEvent = {
@@ -248,8 +324,8 @@ describe("SorobanEventListener event processing & reconciliation", () => {
   });
 
   it("processes 'don_rec' event and emits DONATION_RECORDED_EVENT", async () => {
-    const emittedEvents: any[] = [];
-    const handler = (evt: any) => emittedEvents.push(evt);
+    const emittedEvents: DonationRecordedEvent[] = [];
+    const handler = (evt: DonationRecordedEvent) => emittedEvents.push(evt);
     eventBus.on(DONATION_RECORDED_EVENT, handler);
 
     const rawEvent: RawEvent = {
@@ -277,5 +353,116 @@ describe("SorobanEventListener event processing & reconciliation", () => {
     });
 
     eventBus.off(DONATION_RECORDED_EVENT, handler);
+  });
+});
+
+describe("SorobanEventListener donated reconciliation (#259)", () => {
+  beforeEach(() => {
+    jest.clearAllMocks();
+    // Default the creator lookup to unknown so a test that forgets to stub it
+    // fails loudly (no row written) rather than silently creating one.
+    mockedPrisma.creator.findFirst.mockResolvedValue(null);
+  });
+
+  it("creates and verifies a Donation row for an event with no client report", async () => {
+    mockedPrisma.creator.findFirst.mockResolvedValue({ id: 7 });
+    mockedPrisma.donation.findFirst.mockResolvedValue(null);
+    const created = {
+      id: 9,
+      creatorId: 7,
+      senderAddress: "GDONOR123",
+      amount: 150,
+      currency: "XLM",
+      message: "Coffee for dev",
+      transactionHash: "tx_hash_donated_123",
+      createdAt: new Date("2026-08-01T00:00:00.000Z"),
+    };
+    mockedPrisma.donation.create.mockResolvedValue(created);
+
+    const handled = await sorobanEventListener.processEvent(donatedRawEvent());
+    await flushNotifications();
+
+    expect(handled).toBe(true);
+    // Stroops are converted to whole units (1500000000 / 1e7) and the row is
+    // written already verified.
+    expect(mockedPrisma.donation.create).toHaveBeenCalledWith({
+      data: expect.objectContaining({
+        creatorId: 7,
+        senderAddress: "GDONOR123",
+        amount: 150,
+        currency: "XLM",
+        transactionHash: "tx_hash_donated_123",
+        rpcEventId: "0000000000001050-00000",
+        verified: true,
+      }),
+    });
+    // The donation is applied to the creator's goals exactly once ...
+    expect(mockedPrisma.goal.findMany).toHaveBeenCalledWith({
+      where: { creatorId: 7, currency: "XLM", status: "ACTIVE" },
+    });
+    // ... and the donation/goal notices fire once.
+    expect(mockedNotifyReceived).toHaveBeenCalledTimes(1);
+    expect(mockedNotifyConfirmation).toHaveBeenCalledTimes(1);
+    expect(mockedNotifyGoalsReached).toHaveBeenCalledTimes(1);
+  });
+
+  it("verifies a pending client report and backfills the authoritative event data", async () => {
+    mockedPrisma.creator.findFirst.mockResolvedValue({ id: 7 });
+    mockedPrisma.donation.findFirst.mockResolvedValue({ id: 5, verified: false });
+    mockedPrisma.donation.updateMany.mockResolvedValue({ count: 1 });
+    mockedPrisma.donation.findUniqueOrThrow.mockResolvedValue({
+      id: 5,
+      creatorId: 7,
+      senderAddress: "GDONOR123",
+      amount: 150,
+      currency: "XLM",
+      verified: true,
+      createdAt: new Date("2026-08-01T00:00:00.000Z"),
+    });
+
+    await sorobanEventListener.processEvent(donatedRawEvent());
+    await flushNotifications();
+
+    // The conditional guard (`verified: false`) is what makes the flip
+    // atomic, so a concurrent reconciliation can't apply the row twice.
+    expect(mockedPrisma.donation.updateMany).toHaveBeenCalledWith({
+      where: { id: 5, verified: false },
+      data: expect.objectContaining({
+        verified: true,
+        rpcEventId: "0000000000001050-00000",
+        amount: 150,
+        currency: "XLM",
+      }),
+    });
+    expect(mockedPrisma.donation.create).not.toHaveBeenCalled();
+    expect(mockedPrisma.goal.findMany).toHaveBeenCalledTimes(1);
+    expect(mockedNotifyReceived).toHaveBeenCalledTimes(1);
+  });
+
+  it("treats a replay of an already-verified event as a no-op", async () => {
+    mockedPrisma.creator.findFirst.mockResolvedValue({ id: 7 });
+    mockedPrisma.donation.findFirst.mockResolvedValue({ id: 5, verified: true });
+
+    await sorobanEventListener.processEvent(donatedRawEvent());
+    await flushNotifications();
+
+    expect(mockedPrisma.donation.create).not.toHaveBeenCalled();
+    expect(mockedPrisma.donation.updateMany).not.toHaveBeenCalled();
+    // No double-counting: neither goals nor notifications are touched.
+    expect(mockedPrisma.goal.findMany).not.toHaveBeenCalled();
+    expect(mockedNotifyReceived).not.toHaveBeenCalled();
+    expect(mockedNotifyGoalsReached).not.toHaveBeenCalled();
+  });
+
+  it("skips (with a warning) an event for an unknown creator wallet", async () => {
+    const warn = jest.spyOn(console, "warn").mockImplementation(() => undefined);
+    mockedPrisma.creator.findFirst.mockResolvedValue(null);
+
+    await sorobanEventListener.processEvent(donatedRawEvent());
+
+    expect(mockedPrisma.donation.create).not.toHaveBeenCalled();
+    expect(mockedPrisma.donation.findFirst).not.toHaveBeenCalled();
+    expect(warn).toHaveBeenCalledWith(expect.stringContaining("unknown creator wallet"));
+    warn.mockRestore();
   });
 });

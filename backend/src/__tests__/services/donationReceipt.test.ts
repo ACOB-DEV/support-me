@@ -1,6 +1,27 @@
+import { Donation, Prisma } from "@prisma/client";
 import { notifyDonationReceived } from "../../services/donationNotifications";
 import prisma from "../../prisma";
 import { emailService } from "../../services/email/emailService";
+
+// Fills in the `Donation` fields these tests don't care about, so each test
+// only has to spell out the fields its assertions actually depend on instead
+// of repeating the full Prisma row shape (and casting it away) three times.
+function fakeDonation(overrides: Partial<Donation> & Pick<Donation, "id" | "creatorId">): Donation {
+  return {
+    senderAddress: "GTEST",
+    amount: new Prisma.Decimal(0),
+    currency: "XLM",
+    message: null,
+    transactionHash: null,
+    onChainEventId: null,
+    rpcEventId: null,
+    operationIndex: 0,
+    eventIndex: 0,
+    verified: true,
+    createdAt: new Date("2026-04-01T12:00:00Z"),
+    ...overrides,
+  };
+}
 
 jest.mock("../../prisma", () => ({
   __esModule: true,
@@ -41,18 +62,17 @@ describe("notifyDonationReceived", () => {
       walletAddress: "GBOB123",
     });
 
-    const fakeDonation = {
+    const donation = fakeDonation({
       id: 42,
       creatorId: 1,
       senderAddress: "GBOB123",
-      amount: 50,
+      amount: new Prisma.Decimal(50),
       currency: "XLM",
       message: "Great work!",
       transactionHash: "tx_hash_123",
-      createdAt: new Date("2026-04-01T12:00:00Z"),
-    } as any;
+    });
 
-    const result = await notifyDonationReceived(fakeDonation);
+    const result = await notifyDonationReceived(donation);
 
     expect(result).toBe(true);
     expect(mockSendReceipt).toHaveBeenCalledWith(
@@ -86,18 +106,17 @@ describe("notifyDonationReceived", () => {
       },
     });
 
-    const fakeDonation = {
+    const donation = fakeDonation({
       id: 43,
       creatorId: 2,
       senderAddress: "anonymous",
-      amount: 10,
+      amount: new Prisma.Decimal(10),
       currency: "USDC",
       message: null,
       transactionHash: null,
-      createdAt: new Date("2026-04-01T12:00:00Z"),
-    } as any;
+    });
 
-    const result = await notifyDonationReceived(fakeDonation);
+    const result = await notifyDonationReceived(donation);
 
     expect(result).toBe(true);
     expect(mockSendReceipt).toHaveBeenCalledWith(
@@ -125,18 +144,17 @@ describe("notifyDonationReceived", () => {
       },
     });
 
-    const fakeDonation = {
+    const donation = fakeDonation({
       id: 44,
       creatorId: 3,
       senderAddress: "GXYZ",
-      amount: 5,
+      amount: new Prisma.Decimal(5),
       currency: "XLM",
       message: null,
       transactionHash: null,
-      createdAt: new Date(),
-    } as any;
+    });
 
-    const result = await notifyDonationReceived(fakeDonation);
+    const result = await notifyDonationReceived(donation);
 
     expect(result).toBe(false);
     expect(mockSendReceipt).not.toHaveBeenCalled();

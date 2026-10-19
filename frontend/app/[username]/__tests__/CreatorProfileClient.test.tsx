@@ -60,6 +60,10 @@ vi.mock('@hugeicons/react', () => ({
   HugeiconsIcon: () => null,
 }));
 
+const { mockLoadAccount } = vi.hoisted(() => ({
+  mockLoadAccount: vi.fn().mockResolvedValue({ balances: [] }),
+}));
+
 // lib/assets.js's ASSETS registry is gated on NEXT_PUBLIC_USDC_ISSUER /
 // NEXT_PUBLIC_USDT_ISSUER at module-load time (see lib/__tests__/assets.test.ts
 // for that logic in isolation). Here we only care about how
@@ -71,7 +75,10 @@ vi.mock('@/lib/assets', () => ({
   getAsset: (code: string) => ({
     code,
     label: code,
-    balanceMatcher: () => false,
+    balanceMatcher:
+      code === 'XLM'
+        ? (b: { asset_type?: string }) => b.asset_type === 'native'
+        : (b: { asset_code?: string }) => b.asset_code === code,
   }),
 }));
 
@@ -83,8 +90,8 @@ vi.mock('@stellar/stellar-sdk', async () => {
     ...actual,
     Horizon: {
       Server: class {
-        async loadAccount() {
-          return { balances: [] };
+        loadAccount(...args: unknown[]) {
+          return mockLoadAccount(...args);
         }
       },
     },
@@ -189,11 +196,16 @@ function mockFetchSequence(handlers: Record<string, unknown>) {
 
 describe('CreatorProfileClient', () => {
   beforeEach(() => {
+    mockLoadAccount.mockResolvedValue({ balances: [] });
     mockUseAuth.mockReturnValue({
       user: null,
       token: null,
       loading: false,
       loginWithWallet: vi.fn(),
+      getTwitterRedirectUrl: vi.fn(),
+      completeTwitterLogin: vi.fn(),
+      requestMagicLink: vi.fn(),
+      verifyMagicLink: vi.fn(),
       logout: vi.fn(),
     });
     vi.stubGlobal('EventSource', FakeEventSource as unknown as typeof EventSource);
@@ -322,6 +334,70 @@ describe('CreatorProfileClient', () => {
 
     await waitFor(() => expect(screen.getByRole('button', { name: 'XLM' })).toBeInTheDocument());
     expect(screen.queryByRole('button', { name: 'USDT' })).not.toBeInTheDocument();
+  });
+
+  // Issue #155: Donate page shows XLM balance value under USDC label after switching asset
+  it('updates displayed balance to actual balance of newly selected asset when switching asset toggle (#155)', async () => {
+    mockFetchSequence({
+      '/api/creators/alice': baseCreator,
+      '/api/goals/alice': { items: [] },
+    });
+    mockConnectWallet.mockResolvedValue('GDONORXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXX');
+    mockLoadAccount.mockResolvedValue({
+      balances: [
+        { asset_type: 'native', balance: '100.5000' },
+        { asset_type: 'credit_alphanum4', asset_code: 'USDC', balance: '25.0000' },
+      ],
+    });
+
+    await renderProfile('alice');
+    await waitFor(() => expect(screen.getByText('Alice')).toBeInTheDocument());
+
+    await userEvent.click(screen.getByRole('button', { name: /connect wallet/i }));
+
+    // Initially displays the connected wallet's XLM balance
+    await waitFor(() => expect(screen.getByText('100.5000 XLM')).toBeInTheDocument());
+
+    // Switch to USDC
+    await userEvent.click(screen.getByRole('button', { name: 'USDC' }));
+
+    // Displayed balance updates to the actual USDC balance, not the previous XLM balance relabeled
+    await waitFor(() => expect(screen.getByText('25.0000 USDC')).toBeInTheDocument());
+    expect(screen.queryByText('100.5000 USDC')).not.toBeInTheDocument();
+
+    // Switch back to XLM
+    await userEvent.click(screen.getByRole('button', { name: 'XLM' }));
+
+    // Displayed balance updates back to XLM balance
+    await waitFor(() => expect(screen.getByText('100.5000 XLM')).toBeInTheDocument());
+    expect(screen.queryByText('25.0000 XLM')).not.toBeInTheDocument();
+  });
+
+  it('displays zero balance when switching to an asset without a balance or trustline instead of showing XLM balance (#155)', async () => {
+    mockFetchSequence({
+      '/api/creators/alice': baseCreator,
+      '/api/goals/alice': { items: [] },
+    });
+    mockConnectWallet.mockResolvedValue('GDONORXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXX');
+    mockLoadAccount.mockResolvedValue({
+      balances: [
+        { asset_type: 'native', balance: '9970.9243' },
+      ],
+    });
+
+    await renderProfile('alice');
+    await waitFor(() => expect(screen.getByText('Alice')).toBeInTheDocument());
+
+    await userEvent.click(screen.getByRole('button', { name: /connect wallet/i }));
+
+    await waitFor(() => expect(screen.getByText('9970.9243 XLM')).toBeInTheDocument());
+
+    // Switch to USDC when wallet has no USDC balance
+    await userEvent.click(screen.getByRole('button', { name: 'USDC' }));
+
+    // Displays 0.0000 USDC instead of the XLM balance value
+    await waitFor(() => expect(screen.getByText('0.0000 USDC')).toBeInTheDocument());
+    expect(screen.queryByText('9970.9243 USDC')).not.toBeInTheDocument();
   });
 
   // Issue #120: quick-select preset amount buttons on the donate page.
@@ -563,6 +639,97 @@ describe('CreatorProfileClient', () => {
           /this profile and the donation form only/i
         );
       });
+    });
+  });
+
+  describe('profile load errors', () => {
+    function mockFetchResponses(
+      responder: (url: string, init?: RequestInit) => Promise<Response> | Response
+    ) {
+      vi.stubGlobal(
+        'fetch',
+        vi.fn(async (url: string, init?: RequestInit) => responder(url, init))
+      );
+    }
+
+    const response = (status: number, body: unknown = {}) =>
+      ({ ok: status >= 200 && status < 300, status, json: async () => body }) as Response;
+
+    it('shows the not-found screen only for a 404', async () => {
+      mockFetchResponses((url) =>
+        url.includes('/api/creators/') ? response(404) : response(200, { items: [] })
+      );
+
+      await renderProfile('alice');
+
+      await waitFor(() =>
+        expect(screen.getByRole('heading', { name: /creator not found/i })).toBeInTheDocument()
+      );
+      expect(screen.queryByRole('button', { name: /try again/i })).not.toBeInTheDocument();
+    });
+
+    it('shows a retryable error instead of not-found for a 500', async () => {
+      let creatorCalls = 0;
+      mockFetchResponses((url) => {
+        if (url.includes('/api/creators/alice')) {
+          creatorCalls += 1;
+          return creatorCalls === 1
+            ? response(500)
+            : response(200, baseCreator);
+        }
+        return response(200, { items: [] });
+      });
+
+      await renderProfile('alice');
+
+      await waitFor(() =>
+        expect(screen.getByRole('alert')).toHaveTextContent(/something went wrong/i)
+      );
+      expect(screen.queryByRole('heading', { name: /creator not found/i })).not.toBeInTheDocument();
+
+      await userEvent.click(screen.getByRole('button', { name: /try again/i }));
+
+      await waitFor(() => expect(screen.getByText('Alice')).toBeInTheDocument());
+      expect(creatorCalls).toBe(2);
+    });
+
+    it('shows a retryable error, not not-found, when the request fails on the network', async () => {
+      let creatorCalls = 0;
+      mockFetchResponses((url) => {
+        if (url.includes('/api/creators/alice')) {
+          creatorCalls += 1;
+          if (creatorCalls === 1) throw new TypeError('Failed to fetch');
+        }
+        if (url.includes('/api/goals/alice')) return response(200, { items: [goal()] });
+        return response(200, baseCreator);
+      });
+
+      await renderProfile('alice');
+
+      await waitFor(() =>
+        expect(screen.getByRole('alert')).toHaveTextContent(/something went wrong/i)
+      );
+      expect(screen.queryByRole('heading', { name: /creator not found/i })).not.toBeInTheDocument();
+
+      await userEvent.click(screen.getByRole('button', { name: /try again/i }));
+
+      await waitFor(() => expect(screen.getByText('New microphone')).toBeInTheDocument());
+      expect(creatorCalls).toBe(2);
+    });
+
+    it('encodes the username in the creator request URL', async () => {
+      mockFetchResponses((url) => {
+        if (url.includes('/api/creators/')) return response(200, baseCreator);
+        return response(200, { items: [] });
+      });
+
+      await renderProfile('weird/name');
+
+      await waitFor(() => expect(screen.getByText('Alice')).toBeInTheDocument());
+      const creatorCall = vi
+        .mocked(fetch)
+        .mock.calls.find(([url]) => String(url).includes('/api/creators/'));
+      expect(String(creatorCall?.[0])).toContain('/api/creators/weird%2Fname');
     });
   });
 

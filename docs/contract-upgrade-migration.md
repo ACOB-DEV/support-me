@@ -49,34 +49,33 @@ This runbook covers the steps for performing a contract upgrade safely.
 
 ### Migration Steps
 
-1. **Deploy new contracts**
+1. **Deploy new contracts with constructor args**
+
+   Both contracts are initialized atomically by `__constructor` at deploy
+   time; there is no separate `initialize` step. Because each contract needs
+   the other's address, derive the registry ID from a salt first (see
+   [`contract-deploy-workflow.md`](contract-deploy-workflow.md#deploy-to-testnet)
+   for the full procedure and multi-admin arguments):
    ```bash
-   cd contracts/donation
-   stellar contract deploy --wasm target/wasm32v1-none/release/donation.wasm --source-account <admin-key> --network testnet
-   cd ../creator-registry
-   stellar contract deploy --wasm target/wasm32v1-none/release/creator_registry.wasm --source-account <admin-key> --network testnet
+   SALT=$(openssl rand -hex 32)
+   REGISTRY_ID=$(stellar contract id wasm --salt "$SALT" --source-account <admin-key> --network testnet)
+
+   DONATION_ID=$(stellar contract deploy \
+     --wasm target/wasm32v1-none/release/donation.wasm \
+     --source-account <admin-key> --network testnet -- \
+     --admins '["<admin-address>"]' --threshold 1 --timelock_delay 0 \
+     --registry "$REGISTRY_ID")
+
+   stellar contract deploy \
+     --wasm target/wasm32v1-none/release/creator_registry.wasm --salt "$SALT" \
+     --source-account <admin-key> --network testnet -- \
+     --admins '["<admin-address>"]' --threshold 1 --timelock_delay 0 \
+     --donation_contract "$DONATION_ID"
    ```
 
-2. **Initialize new contracts**
-   ```bash
-   # Initialize donation contract with new registry address
-   soroban contract invoke \
-     --id <new-donation-contract-id> \
-     --source <admin-key> \
-     --network testnet \
-     initialize \
-     --admin <admin-address> \
-     --registry <new-registry-contract-id>
-
-   # Initialize registry with new donation contract address
-   soroban contract invoke \
-     --id <new-registry-contract-id> \
-     --source <admin-key> \
-     --network testnet \
-     initialize \
-     --admin <admin-address> \
-     --donation_contract <new-donation-contract-id>
-   ```
+2. **Verify the pairing**
+   - The registry deploy must print the same ID as `$REGISTRY_ID`.
+   - `is_admin` returns `true` for the intended admin(s) on both contracts.
 
 3. **Set executor on new donation contract** (if using recurring donations)
    ```bash
@@ -133,6 +132,12 @@ For recurring donations, active subscriptions are stored on-chain in the donatio
 #### Creator Profiles
 
 Creator profiles (username, lifetime totals) live in the creator-registry contract. When migrating:
+
+> **Username rules:** the current registry only accepts usernames of 1-32
+> bytes using `a-z`, `0-9`, `_` and `-`, and each username can belong to one
+> address. Registries deployed before this rule may hold usernames that the
+> new registry rejects (uppercase, dots, spaces, duplicates); those creators
+> must pick a new username when re-registering or being migrated.
 
 - **Option A: Fresh start**
   - New registry starts empty

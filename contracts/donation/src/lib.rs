@@ -20,8 +20,20 @@
 //! High-risk administrative operations (setting executor, rotating admins,
 //! adjusting threshold, pausing operations) require multi-signature proposal,
 //! approval threshold, and timelock delay before execution.
+//!
+//! Initialization happens atomically at deploy time through `__constructor`;
+//! there is no separate public initializer that could be front-run.
+//!
+//! Unlike the donation log, instance storage (admins, registry, executor,
+//! pause flag, token allowlist) *is* kept alive: every state-changing entry
+//! point extends the instance TTL, and `bump()` lets anyone extend it during
+//! idle periods. See the `common` crate docs for the TTL constants.
 
-use common::{AdminAction, AdminProposal, CreatorProfile, DonationRecord, Subscription};
+use common::{
+    extend_instance_ttl, extend_persistent_ttl, extend_subscription_ttl, validate_admin_set,
+    AdminAction, AdminProposal, CreatorProfile, DonationRecord, Subscription,
+    ADMIN_PROPOSAL_TTL_SECONDS,
+};
 use soroban_sdk::{
     contract, contracterror, contractevent, contractimpl, symbol_short, token, Address, Env,
     IntoVal, String, Symbol, Val, Vec,
@@ -36,6 +48,7 @@ const TIMELOCK_DELAY_KEY: Symbol = symbol_short!("delay");
 const PROPOSAL_COUNTER_KEY: Symbol = symbol_short!("prop_ctr");
 const PROPOSAL_KEY: Symbol = symbol_short!("proposal");
 const APPROVAL_KEY: Symbol = symbol_short!("approval");
+const CANCEL_KEY: Symbol = symbol_short!("cancel");
 const PAUSED_KEY: Symbol = symbol_short!("paused");
 const REGISTRY_KEY: Symbol = symbol_short!("registry");
 const SUBSCRIPTIONS_KEY: Symbol = symbol_short!("subs");
@@ -119,6 +132,16 @@ pub struct ProposalExecutedEvent {
     pub proposal_id: u64,
     #[topic]
     pub executor: Address,
+}
+
+/// Emitted when an admin proposal is cancelled — either unilaterally by its
+/// proposer or after `threshold` current admins requested the cancellation.
+#[contractevent(topics = ["prop_cancelled"])]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct ProposalCancelledEvent {
+    pub proposal_id: u64,
+    #[topic]
+    pub cancelled_by: Address,
 }
 
 #[contractevent(topics = ["goal_upd"])]
@@ -232,6 +255,14 @@ impl DonationContract {
             .set(&TIMELOCK_DELAY_KEY, &timelock_delay);
         env.storage().instance().set(&PAUSED_KEY, &false);
         env.storage().instance().set(&REGISTRY_KEY, &registry);
+        extend_instance_ttl(&env);
+    }
+
+    /// Permissionless keep-alive: extends the instance TTL so the contract is
+    /// not archived during long periods without other state-changing calls.
+    /// Intended to be called on a schedule by the backend executor.
+    pub fn bump(env: Env) {
+        extend_instance_ttl(&env);
     }
 
     /// Returns whether a given address is an authorized contract admin.
@@ -242,6 +273,31 @@ impl DonationContract {
             .get(&ADMINS_KEY)
             .unwrap_or_else(|| Vec::new(&env));
         Self::contains_address(&admins, &address)
+    }
+
+    /// Recounts `key` votes for `proposal_id` against the *current* admin set
+    /// (`ADMINS_KEY`), so approvals (or cancellation requests) cast by an
+    /// admin who has since been removed no longer count toward the threshold.
+    /// Used at execution instead of trusting the cached `approvals_count`.
+    fn count_current_admin_votes(env: &Env, key: Symbol, proposal_id: u64) -> u32 {
+        let admins: Vec<Address> = env
+            .storage()
+            .instance()
+            .get(&ADMINS_KEY)
+            .unwrap_or_else(|| Vec::new(env));
+        let mut votes: u32 = 0;
+        for i in 0..admins.len() {
+            let admin = admins.get(i).unwrap();
+            let voted: bool = env
+                .storage()
+                .persistent()
+                .get(&(key.clone(), proposal_id, admin))
+                .unwrap_or(false);
+            if voted {
+                votes = votes.checked_add(1).expect("vote count overflow");
+            }
+        }
+        votes
     }
 
     /// Returns whether contract transfers/operations are currently paused.
@@ -256,6 +312,7 @@ impl DonationContract {
             soroban_sdk::panic_with_error!(&env, DonationError::Unauthorized);
         }
         env.storage().instance().set(&PAUSED_KEY, &true);
+        extend_instance_ttl(&env);
     }
 
     /// Proposes a multi-signature administrative action.
@@ -288,7 +345,9 @@ impl DonationContract {
             approvals_count: 1,
             created_at: now,
             eta,
+            expires_at,
             executed: false,
+            cancelled: false,
         };
 
         env.storage()
@@ -355,6 +414,65 @@ impl DonationContract {
             proposal_id,
             admin,
             approvals_count: proposal.approvals_count,
+        }
+        .publish(&env);
+    }
+
+    /// Cancels an administrative proposal before it is executed. The proposer
+    /// can cancel their own proposal unilaterally. Any other caller must be a
+    /// current admin: each such admin records a cancellation request, counted
+    /// against the *current* admin set exactly like approvals (requests from
+    /// since-removed admins do not count), and the proposal is marked
+    /// cancelled once `threshold` requests have been reached. Emits
+    /// [`ProposalCancelledEvent`] when the proposal is marked cancelled.
+    pub fn cancel_admin_action(env: Env, caller: Address, proposal_id: u64) {
+        caller.require_auth();
+        let mut proposal: AdminProposal = env
+            .storage()
+            .persistent()
+            .get(&(PROPOSAL_KEY, proposal_id))
+            .expect("proposal not found");
+        assert!(!proposal.executed, "proposal already executed");
+        assert!(!proposal.cancelled, "proposal already cancelled");
+        extend_instance_ttl(&env);
+
+        if caller != proposal.proposer {
+            assert!(
+                Self::is_admin(env.clone(), caller.clone()),
+                "only the proposer or an admin can cancel a proposal"
+            );
+            let already_requested: bool = env
+                .storage()
+                .persistent()
+                .get(&(CANCEL_KEY, proposal_id, caller.clone()))
+                .unwrap_or(false);
+            assert!(
+                !already_requested,
+                "admin has already requested cancellation"
+            );
+            env.storage()
+                .persistent()
+                .set(&(CANCEL_KEY, proposal_id, caller.clone()), &true);
+
+            let requests = Self::count_current_admin_votes(&env, CANCEL_KEY, proposal_id);
+            let threshold: u32 = env
+                .storage()
+                .instance()
+                .get(&THRESHOLD_KEY)
+                .expect("threshold not set");
+            if requests < threshold {
+                return;
+            }
+        }
+
+        proposal.cancelled = true;
+        env.storage()
+            .persistent()
+            .set(&(PROPOSAL_KEY, proposal_id), &proposal);
+
+        ProposalCancelledEvent {
+            proposal_id,
+            cancelled_by: caller,
         }
         .publish(&env);
     }
@@ -457,6 +575,7 @@ impl DonationContract {
             };
             admin.require_auth();
             env.storage().instance().set(&EXECUTOR_KEY, &executor);
+            extend_instance_ttl(&env);
         } else {
             soroban_sdk::panic_with_error!(&env, DonationError::MultiSigRequired);
         }
@@ -499,6 +618,7 @@ impl DonationContract {
         };
         admin.require_auth();
         env.storage().instance().remove(&(ALLOWED_TOKEN_KEY, token));
+        extend_instance_ttl(&env);
     }
 
     /// Checks if a token is currently in the allowlist.
@@ -517,6 +637,7 @@ impl DonationContract {
         };
         admin.require_auth();
         env.storage().instance().set(&MIN_DONATION_KEY, &min_amount);
+        extend_instance_ttl(&env);
     }
 
     /// Returns the currently configured minimum donation amount (0 if unconstrained).
@@ -535,6 +656,7 @@ impl DonationContract {
         };
         admin.require_auth();
         env.storage().instance().set(&MAX_DONATION_KEY, &max_amount);
+        extend_instance_ttl(&env);
     }
 
     /// Returns the currently configured maximum donation amount (0 if unconstrained).
@@ -772,6 +894,11 @@ impl DonationContract {
         env.storage()
             .persistent()
             .set(&(SUBSCRIPTIONS_KEY, subscription_id), &subscription);
+        extend_subscription_ttl(
+            &env,
+            &(SUBSCRIPTIONS_KEY, subscription_id),
+            subscription.interval_secs,
+        );
 
         token_client.transfer_from(
             &env.current_contract_address(),
@@ -855,6 +982,11 @@ impl DonationContract {
         env.storage()
             .persistent()
             .set(&(SUBSCRIPTIONS_KEY, subscription_id), &subscription);
+        extend_subscription_ttl(
+            &env,
+            &(SUBSCRIPTIONS_KEY, subscription_id),
+            subscription.interval_secs,
+        );
 
         let token_client = token::Client::new(&env, &subscription.token);
         token_client.approve(&supporter, &env.current_contract_address(), &0, &0);
@@ -867,6 +999,25 @@ impl DonationContract {
         .publish(&env);
     }
 
+    /// Permissionless keep-alive for a subscription entry. Intervals longer
+    /// than the maximum extension (e.g. annual) outlive a single bump, so the
+    /// backend executor should call this between charges. Only extends the TTL
+    /// (and only once it has dropped below the threshold); it changes no
+    /// subscription data and moves no funds.
+    pub fn bump_subscription(env: Env, subscription_id: u64) {
+        extend_instance_ttl(&env);
+        let subscription: Subscription = env
+            .storage()
+            .persistent()
+            .get(&(SUBSCRIPTIONS_KEY, subscription_id))
+            .expect("subscription not found");
+        extend_subscription_ttl(
+            &env,
+            &(SUBSCRIPTIONS_KEY, subscription_id),
+            subscription.interval_secs,
+        );
+    }
+
     /// Fetch a subscription by its ID.
     pub fn get_subscription(env: Env, subscription_id: u64) -> Option<Subscription> {
         env.storage()
@@ -877,6 +1028,7 @@ impl DonationContract {
     /// Cross-contract call: updates a creator's funding goal in the CreatorRegistry.
     pub fn set_goal(env: Env, creator: Address, goal_amount: i128) {
         creator.require_auth();
+        extend_instance_ttl(&env);
         let registry = Self::registry_address(&env);
         let args: Vec<Val> = (creator.clone(), goal_amount).into_val(&env);
         let (): () = env.invoke_contract(&registry, &Symbol::new(&env, "set_goal"), args);
@@ -934,7 +1086,7 @@ impl DonationContract {
         env.storage()
             .instance()
             .get(&REGISTRY_KEY)
-            .expect("donation contract not initialized: call initialize() first")
+            .expect("donation contract not initialized")
     }
 
     fn contains_address(vec: &Vec<Address>, target: &Address) -> bool {
@@ -969,15 +1121,8 @@ mod tests {
         CreatorRegistryContractClient<'_>,
     ) {
         let admin = Address::generate(env);
-        let registry_id = env.register(CreatorRegistryContract, ());
-        let donation_id = env.register(DonationContract, ());
-
-        let registry_client = CreatorRegistryContractClient::new(env, &registry_id);
-        let donation_client = DonationContractClient::new(env, &donation_id);
-
-        registry_client.initialize(&admin, &donation_id);
-        donation_client.initialize(&admin, &registry_id);
-
+        let (donation_client, registry_client) =
+            deploy_pair(env, Vec::from_array(env, [admin.clone()]), 1, 0);
         (admin, donation_client, registry_client)
     }
 
@@ -1012,20 +1157,15 @@ mod tests {
         admins.push_back(admin2.clone());
         admins.push_back(admin3.clone());
 
-        let registry_id = env.register(CreatorRegistryContract, ());
-        let donation_id = env.register(DonationContract, ());
-
-        let donation_client = DonationContractClient::new(&env, &donation_id);
-
         // 2-of-3 threshold with 100 seconds timelock delay
-        donation_client.initialize_multisig(&admins, &2, &100, &registry_id);
+        let (donation_client, _registry_client) = deploy_pair(&env, admins, 2, 100);
 
         let prop_id = donation_client
             .propose_admin_action(&admin1, &AdminAction::SetExecutor(executor.clone()));
 
         let prop = donation_client.get_proposal(&prop_id).unwrap();
         assert_eq!(prop.approvals_count, 1);
-        assert_eq!(prop.executed, false);
+        assert!(!prop.executed);
 
         donation_client.approve_admin_action(&admin2, &prop_id);
 
@@ -1038,7 +1178,7 @@ mod tests {
         donation_client.execute_admin_action(&admin1, &prop_id);
 
         let prop_exec = donation_client.get_proposal(&prop_id).unwrap();
-        assert_eq!(prop_exec.executed, true);
+        assert!(prop_exec.executed);
     }
 
     #[test]
@@ -1047,9 +1187,9 @@ mod tests {
         env.mock_all_auths_allowing_non_root_auth();
         let (admin, donation_client, _registry_client) = setup(&env);
 
-        assert_eq!(donation_client.is_paused(), false);
+        assert!(!donation_client.is_paused());
         donation_client.emergency_pause(&admin);
-        assert_eq!(donation_client.is_paused(), true);
+        assert!(donation_client.is_paused());
     }
 
     #[test]

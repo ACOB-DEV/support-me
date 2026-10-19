@@ -14,6 +14,10 @@ document under `docs/`, add a link to it here.
 - [Testnet troubleshooting](testnet-troubleshooting.md): every wallet,
   donation, subscription and cash-out error title, with testnet causes and
   fixes, plus an FAQ.
+- [Testnet demo walkthrough](testnet-demo-walkthrough.md): a scripted,
+  step-by-step run through onboarding, one-off and recurring donations,
+  goals and receipts on testnet, with a video shot list for re-recording the
+  demo.
 - [Architecture overview](architecture.md): components, data flow and how the
   frontend, backend and contracts fit together.
 

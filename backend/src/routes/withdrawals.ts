@@ -10,7 +10,7 @@ const router = Router();
 
 router.get(
   "/",
-  authMiddleware as any,
+  authMiddleware,
   validate({ query: listWithdrawalsQuerySchema }),
   asyncHandler(async (req: AuthRequest, res) => {
     const { creatorUsername } = req.query as { creatorUsername?: string };
@@ -35,7 +35,7 @@ router.get(
 
 router.post(
   "/",
-  authMiddleware as any,
+  authMiddleware,
   validate({ body: createWithdrawalSchema }),
   asyncHandler(async (req: AuthRequest, res) => {
     const { creatorUsername, amountIn, amountOut, fee, currency, anchorTxId, stellarTxId, status } =

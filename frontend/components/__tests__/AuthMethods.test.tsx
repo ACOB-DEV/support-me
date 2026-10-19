@@ -31,9 +31,11 @@ describe('AuthMethods', () => {
     mockUseAuth.mockReset();
     // getTwitterRedirectUrl success navigates via window.location.href;
     // jsdom doesn't implement real navigation, so stub it to observe the call.
-    // @ts-expect-error - redefining a read-only jsdom property for the test
-    delete window.location;
-    window.location = { ...originalLocation, href: '' } as Location;
+    Object.defineProperty(window, 'location', {
+      value: { ...originalLocation, href: '' },
+      writable: true,
+      configurable: true,
+    });
   });
 
   it('calls loginWithWallet when Connect Wallet is clicked', async () => {

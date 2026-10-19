@@ -92,10 +92,13 @@ router.post(
     // row using its RPC-provided event identity.
     const operationIndex = 0;
     const eventIndex = 0;
-    const onChainEventId = transactionHash
-      ? `${transactionHash}:${operationIndex}:${eventIndex}`
-      : undefined;
-    const verified = !transactionHash;
+    const onChainEventId = `${transactionHash}:${operationIndex}:${eventIndex}`;
+    // Client reports are never trusted as verified (issue #258): only the
+    // server-side verification paths (the event listener / subscription
+    // executor) may set verified: true. A reported donation is stored
+    // provisional and excluded from verified-only aggregates until it is
+    // corroborated on-chain.
+    const verified = false;
 
     // Tracks whether this request is the one that actually inserted the
     // donation row, as opposed to an idempotent replay returning the
@@ -126,48 +129,41 @@ router.post(
       const creator = await client.creator.findUnique({ where: { username: creatorUsername } });
       if (!creator) throw new NotFoundError("Creator not found");
 
-      const donation = onChainEventId
-        ? await client.donation.upsert({
-            where: {
-              transactionHash_operationIndex_eventIndex: {
-                transactionHash,
-                operationIndex,
-                eventIndex,
-              },
-            },
-            update: {},
-            create: {
-              creatorId: creator.id,
-              senderAddress,
-              amount,
-              currency,
-              message,
-              transactionHash,
-              onChainEventId,
-              operationIndex,
-              eventIndex,
-              verified: false,
-            },
-          })
-        : await client.donation.create({
-            data: {
-              creatorId: creator.id,
-              senderAddress,
-              amount,
-              currency,
-              message,
-              transactionHash,
-              verified,
-            },
-          });
+      const donation = await client.donation.upsert({
+        where: {
+          transactionHash_operationIndex_eventIndex: {
+            transactionHash,
+            operationIndex,
+            eventIndex,
+          },
+        },
+        update: {},
+        create: {
+          creatorId: creator.id,
+          senderAddress,
+          amount,
+          currency,
+          message,
+          transactionHash,
+          onChainEventId,
+          operationIndex,
+          eventIndex,
+          verified,
+        },
+      });
       await client.donationIdempotencyKey.create({
         data: { key: idempotencyKey, donationId: donation.id, expiresAt },
       });
-      // Only reached for a genuinely new donation (the early returns above,
-      // for a repeated idempotency key, skip this) — otherwise a retried
-      // request would double-count the same donation against goal progress.
-      reachedGoals = await applyDonationToGoals(client, creator.id, currency, amount);
-      isNewDonation = true;
+      // Only a client-reported row that is already verified (no transaction
+      // hash — see the `verified` computation above) may touch goal progress.
+      // A hash-bearing report is provisional (#260): the Soroban listener is
+      // the only writer allowed to verify it and, in doing so, apply it to
+      // goals and send notifications exactly once. Applying here would let an
+      // unauthenticated caller inflate goal progress and trigger emails.
+      if (verified) {
+        reachedGoals = await applyDonationToGoals(client, creator.id, currency, amount);
+        isNewDonation = true;
+      }
       return donation;
     };
 
@@ -183,7 +179,7 @@ router.post(
           include: { donation: true },
         });
         if (existing && existing.expiresAt > new Date()) donation = existing.donation;
-        else if (onChainEventId) {
+        else {
           // The event listener may have won the unique on-chain identity race
           // while this request was being processed. Its row is the canonical
           // result, so return it rather than surfacing a spurious 500.
@@ -198,7 +194,7 @@ router.post(
           });
           if (!onChainDonation) throw error;
           donation = onChainDonation;
-        } else throw error;
+        }
       } else {
         throw error;
       }
@@ -209,24 +205,34 @@ router.post(
     // through. Each notification is independent (allSettled, not
     // Promise.all) so the creator's email failing doesn't skip the
     // supporter's, and each failure is logged individually.
+    // Run notifications in the background so response time doesn't depend on email provider (#275)
     if (isNewDonation) {
-      const [creatorResult, supporterResult] = await Promise.allSettled([
-        notifyDonationReceived(donation),
-        notifyDonationConfirmation(donation),
-      ]);
-      if (creatorResult.status === "rejected") {
-        console.error(
-          `Donation-received email failed for donation ${donation.id}:`,
-          (creatorResult.reason as Error).message
-        );
-      }
-      if (supporterResult.status === "rejected") {
-        console.error(
-          `Donation-confirmation email failed for donation ${donation.id}:`,
-          (supporterResult.reason as Error).message
-        );
-      }
-      await notifyGoalsReached(reachedGoals);
+      setImmediate(async () => {
+        const [creatorResult, supporterResult] = await Promise.allSettled([
+          notifyDonationReceived(donation),
+          notifyDonationConfirmation(donation),
+        ]);
+        if (creatorResult.status === "rejected") {
+          console.error(
+            `Donation-received email failed for donation ${donation.id}:`,
+            (creatorResult.reason as Error).message
+          );
+        }
+        if (supporterResult.status === "rejected") {
+          console.error(
+            `Donation-confirmation email failed for donation ${donation.id}:`,
+            (supporterResult.reason as Error).message
+          );
+        }
+        try {
+          await notifyGoalsReached(reachedGoals);
+        } catch (error) {
+          console.error(
+            `Goals-reached notification failed for donation ${donation.id}:`,
+            (error as Error).message
+          );
+        }
+      });
     }
 
     return res.status(201).json(donation);

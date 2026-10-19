@@ -103,6 +103,10 @@ describe('SettingsPage', () => {
       token: 'test-token',
       loading: false,
       loginWithWallet: vi.fn(),
+      getTwitterRedirectUrl: vi.fn(),
+      completeTwitterLogin: vi.fn(),
+      requestMagicLink: vi.fn(),
+      verifyMagicLink: vi.fn(),
       logout: vi.fn(),
     });
     mockUseCreator.mockReturnValue({ creator: baseCreator, loading: false, invalidate: vi.fn() });
@@ -340,6 +344,52 @@ describe('SettingsPage', () => {
       expect(putCall).toBeTruthy();
       expect(JSON.parse(putCall![1].body as string).presetAmounts).toEqual([1, 5, 10, 25]);
     });
+  });
+
+  it('removes duplicate preset amounts and sorts them ascending before saving (#244)', async () => {
+    mockFetchRoutes({
+      '/api/creators/me': { body: baseCreator },
+      '/api/creators/bob': { body: { ...baseCreator, presetAmounts: [5, 10, 25] } },
+      '/api/goals/bob': { body: { items: [] } },
+    });
+    const user = userEvent.setup();
+
+    render(<SettingsPage />);
+    await waitFor(() => expect(screen.getByLabelText(/Amounts \(comma-separated/i)).toBeInTheDocument());
+
+    await user.type(screen.getByLabelText(/Amounts \(comma-separated/i), '25, 5, 5, 10');
+    await user.click(screen.getByRole('button', { name: 'Save changes' }));
+
+    await waitFor(() => {
+      const putCall = (global.fetch as ReturnType<typeof vi.fn>).mock.calls.find((call) => {
+        const [url, init] = call as [string, RequestInit];
+        return url.includes('/api/creators/bob') && init?.method === 'PUT';
+      }) as [string, RequestInit] | undefined;
+      expect(putCall).toBeTruthy();
+      expect(JSON.parse(putCall![1].body as string).presetAmounts).toEqual([5, 10, 25]);
+    });
+  });
+
+  it('rejects a preset amount below the donation minimum before saving (#244)', async () => {
+    mockFetchRoutes({
+      '/api/creators/me': { body: baseCreator },
+      '/api/goals/bob': { body: { items: [] } },
+    });
+    const { notify } = await import('@/lib/notify');
+    const user = userEvent.setup();
+
+    render(<SettingsPage />);
+    await waitFor(() => expect(screen.getByLabelText(/Amounts \(comma-separated/i)).toBeInTheDocument());
+
+    await user.type(screen.getByLabelText(/Amounts \(comma-separated/i), '0.05, 1');
+    await user.click(screen.getByRole('button', { name: 'Save changes' }));
+
+    expect(notify.error).toHaveBeenCalledWith('Preset amounts must be at least 0.1.');
+    const putCall = (global.fetch as ReturnType<typeof vi.fn>).mock.calls.find((call) => {
+      const [url, init] = call as [string, RequestInit];
+      return url.includes('/api/creators/bob') && init?.method === 'PUT';
+    });
+    expect(putCall).toBeUndefined();
   });
 
   it('rejects a non-numeric preset amount before saving', async () => {

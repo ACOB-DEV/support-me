@@ -131,6 +131,12 @@ const creator = {
   username: 'alice',
   displayName: 'Alice',
   walletAddress: 'GALICE',
+  avatarUrl: null,
+  donationGoal: null,
+  acceptsXlm: true,
+  acceptsUsdc: true,
+  acceptsUsdt: false,
+  socialLinks: null,
 };
 
 const donation = {
@@ -168,16 +174,22 @@ function mockFetchByUrl({
   creatorNotFound = false,
   donations,
   withdrawals,
+  stats,
 }: {
   creator?: unknown;
   creatorNotFound?: boolean;
   donations?: unknown | ((url: string) => Response | Promise<Response>);
   withdrawals?: unknown;
+  stats?: unknown;
 }) {
   if (creatorNotFound) {
     mockUseCreator.mockReturnValue({ creator: null, loading: false, invalidate: vi.fn() });
   } else if (creator !== undefined) {
-    mockUseCreator.mockReturnValue({ creator: creator as any, loading: false, invalidate: vi.fn() });
+    mockUseCreator.mockReturnValue({
+      creator: creator as ReturnType<typeof useCreator>['creator'],
+      loading: false,
+      invalidate: vi.fn(),
+    });
   }
 
   vi.mocked(fetch).mockImplementation((input: RequestInfo | URL) => {
@@ -186,7 +198,9 @@ function mockFetchByUrl({
     // but keep the donations/withdrawals checks ahead of the bare /api/creators.
     if (url.includes('/api/withdrawals')) return Promise.resolve(jsonResponse(withdrawals ?? []));
     if (url.includes('/api/creators/me/stats')) {
-      return Promise.resolve(jsonResponse({ donationCount: 0, uniqueSupporters: 0, currencies: [] }));
+      return Promise.resolve(
+        jsonResponse(stats ?? { donationCount: 0, uniqueSupporters: 0, currencies: [] })
+      );
     }
     if (url.includes('/api/creators/me')) {
       if (creatorNotFound) {
@@ -214,6 +228,10 @@ describe('DashboardPage', () => {
       token: 'jwt-token',
       loading: false,
       loginWithWallet: vi.fn(),
+      getTwitterRedirectUrl: vi.fn(),
+      completeTwitterLogin: vi.fn(),
+      requestMagicLink: vi.fn(),
+      verifyMagicLink: vi.fn(),
       logout: vi.fn(),
     });
     mockUseCreator.mockReturnValue({
@@ -243,20 +261,86 @@ describe('DashboardPage', () => {
   });
 
   it('renders volume split and recent donations once data has loaded', async () => {
-    mockFetchByUrl({ creator, donations: [donation] });
+    // Volume cards read from the server-side aggregate (#245), not the loaded
+    // page, so the mock provides the same 5 XLM the aggregate would report.
+    mockFetchByUrl({
+      creator,
+      donations: [donation],
+      stats: {
+        donationCount: 1,
+        uniqueSupporters: 1,
+        currencies: [{ currency: 'XLM', total: 5, donationCount: 1, uniqueSupporters: 1, average: 5, largest: 5 }],
+      },
+    });
 
     render(<DashboardPage />);
 
     await waitFor(() => expect(screen.getByText('Dashboard')).toBeInTheDocument());
 
     // The single 5 XLM donation shows up as XLM volume, with USDC at zero.
-    expect(screen.getByText('XLM Volume').nextElementSibling).toHaveTextContent('5 XLM');
+    await waitFor(() =>
+      expect(screen.getByText('XLM Volume').nextElementSibling).toHaveTextContent('5 XLM')
+    );
     expect(screen.getByText('USDC Volume').nextElementSibling).toHaveTextContent('0 USDC');
     expect(screen.getByText('nice work')).toBeInTheDocument();
 
     // The creator loads, so the SSE effect subscribes. Wait for it here so the
     // effect runs while EventSource is still stubbed — otherwise it flushes
     // after afterEach tears the stub down and throws "EventSource is not defined".
+    await waitFor(() => expect(FakeEventSource.instances.length).toBe(1));
+  });
+
+  it('shows a volume card per received currency, including USDT, from the full-history aggregate (#245)', async () => {
+    const currencyStat = (currency: string, total: number) => ({
+      currency,
+      total,
+      donationCount: 1,
+      uniqueSupporters: 1,
+      average: total,
+      largest: total,
+    });
+
+    mockFetchByUrl({
+      creator,
+      // The aggregate covers the whole history, including USDT, which is absent
+      // from the loaded page.
+      stats: {
+        donationCount: 3,
+        uniqueSupporters: 2,
+        currencies: [currencyStat('XLM', 5), currencyStat('USDT', 25)],
+      },
+      donations: (url: string) => {
+        if (url.includes('page=2')) {
+          return jsonResponse({
+            items: [{ ...donation, id: 2, amount: 5, message: 'older tip', transactionHash: 'tx2' }],
+            pagination: { page: 2, limit: 20, total: 2, totalPages: 2 },
+          });
+        }
+        return jsonResponse({
+          items: [donation],
+          pagination: { page: 1, limit: 20, total: 2, totalPages: 2 },
+        });
+      },
+    });
+
+    render(<DashboardPage />);
+
+    await waitFor(() => expect(screen.getByText('nice work')).toBeInTheDocument());
+
+    // USDT received shows up even though no USDT row is on the loaded page.
+    await waitFor(() =>
+      expect(screen.getByText('USDT Volume').nextElementSibling).toHaveTextContent('25 USDT')
+    );
+    expect(screen.getByText('XLM Volume').nextElementSibling).toHaveTextContent('5 XLM');
+
+    // Loading older donations does not change the headline totals.
+    const loadMoreBtn = screen.getByRole('button', { name: /load older donations/i });
+    act(() => {
+      loadMoreBtn.click();
+    });
+    await waitFor(() => expect(screen.getByText('older tip')).toBeInTheDocument());
+    expect(screen.getByText('XLM Volume').nextElementSibling).toHaveTextContent('5 XLM');
+
     await waitFor(() => expect(FakeEventSource.instances.length).toBe(1));
   });
 

@@ -14,6 +14,7 @@ import { QrCodeCard } from '@/components/QrCodeCard';
 import { Skeleton } from '@/components/Skeleton';
 import { SOCIAL_PLATFORMS, normalizeSocialValue } from '@/lib/socials';
 import { uploadAvatar } from '@/lib/upload';
+import { parsePresetAmounts } from '@/lib/donation';
 import { API_URL } from '@/lib/api';
 import { fetchWithRetry, isNetworkError } from '@/lib/network';
 import { AccountDataSection } from '@/components/AccountDataSection';
@@ -86,7 +87,7 @@ export default function SettingsPage() {
   useEffect(() => {
     if (!creator) return;
     setDisplayName(creator.displayName || '');
-    setBio((creator as any).bio || '');
+    setBio(creator.bio || '');
     setAvatarUrl(creator.avatarUrl || '');
     setAcceptsXlm(creator.acceptsXlm ?? true);
     setAcceptsUsdc(creator.acceptsUsdc ?? true);
@@ -295,25 +296,16 @@ export default function SettingsPage() {
       goal = parsed;
     }
 
-    // Parse the preset amounts field into a validated array (#120); a blank
-    // field clears any customization, falling back to the donate page's own
-    // hardcoded defaults.
-    let presetAmounts: number[] = [];
-    if (presetAmountsInput.trim()) {
-      const parts = presetAmountsInput
-        .split(',')
-        .map((part) => part.trim())
-        .filter(Boolean);
-      if (parts.length > 6) {
-        notify.error('Enter at most 6 preset amounts.');
-        return;
-      }
-      presetAmounts = parts.map(Number);
-      if (presetAmounts.some((n) => !Number.isFinite(n) || n <= 0)) {
-        notify.error('Preset amounts must be positive numbers.');
-        return;
-      }
+    // Parse the preset amounts field into a validated array (#120, #244); a
+    // blank field clears any customization, falling back to the donate page's
+    // own hardcoded defaults. Shared with the donate page so every saved
+    // preset is guaranteed to be a valid donation amount there.
+    const presets = parsePresetAmounts(presetAmountsInput);
+    if (!presets.ok) {
+      notify.error(presets.error);
+      return;
     }
+    const presetAmounts = presets.amounts;
 
     // Fold raw social inputs into full URLs, dropping any left blank.
     const socialLinks: Record<string, string> = {};

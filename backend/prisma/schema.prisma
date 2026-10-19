@@ -125,6 +125,10 @@ model Creator {
   goals         Goal[]
 
   @@index([walletAddress])
+  // A non-empty walletAddress is unique across creators (#276). That is a
+  // partial unique index ("walletAddress" <> '') created in migration
+  // 20261018000000_creator_wallet_unique, which Prisma's schema language
+  // cannot express, so it is not declared here.
 }
 
 model Donation {
@@ -148,6 +152,12 @@ model Donation {
   createdAt       DateTime                @default(now())
   idempotencyKey  DonationIdempotencyKey?
 
+  // Hot-path indexes (#264). The feed filters by creator and `verified` and
+  // orders by `createdAt`; the leaderboard groups by `currency`; account
+  // export and confirmation emails look donations up by sender.
+  @@index([creatorId, verified, createdAt])
+  @@index([senderAddress])
+  @@index([currency, verified])
   @@unique([transactionHash, operationIndex, eventIndex])
 }
 
@@ -175,6 +185,8 @@ model Withdrawal {
   // A given anchor transaction maps to exactly one withdrawal record. Lets the
   // POST handler be idempotent when the completion path fires more than once.
   @@unique([creatorId, anchorTxId])
+  // Withdrawal history filters by creator and orders by `createdAt` (#264).
+  @@index([creatorId, createdAt])
 }
 
 // A creator can track more than one goal at once (e.g. a one-off "New mic"
@@ -254,6 +266,13 @@ model Subscription {
   failureNotifiedAt DateTime?
   createdAt         DateTime  @default(now())
   updatedAt         DateTime  @updatedAt
+
+  // Hot-path indexes (#264). The executor polls due rows every tick
+  // (`active` + `nextChargeAt`); account export and deletion filter by
+  // supporter; creator-facing lists filter by creator.
+  @@index([active, nextChargeAt])
+  @@index([supporterAddress])
+  @@index([creatorId])
 }
 
 enum EmailEventType {
@@ -275,8 +294,8 @@ model EmailEvent {
   subject           String
   type              EmailEventType
   // Resend's message id, so a later webhook (delivered/bounced/complained)
-  // can be linked back to the SENT row for the same send. Null for send
-  // attempts that failed before Resend returned an id.
+  // can be linked back to the SENT row for the same recipient. Null for
+  // send attempts that failed before Resend returned an id.
   providerMessageId String?
   // Populated on FAILED/BOUNCED rows so the failure is diagnosable from the
   // row alone, without cross-referencing stdout logs.
@@ -285,4 +304,15 @@ model EmailEvent {
 
   @@index([recipient, createdAt])
   @@index([providerMessageId])
+}
+
+// Small key/value store for operational state that must survive restarts.
+// Currently holds the last Soroban ledger sequence the backend observed
+// (`soroban:lastSeenLedger`), which testnet-reset detection (#278) compares
+// against the chain's latest sequence — a jump backwards means the network
+// was wiped and every on-chain ID the backend cached is invalid.
+model NetworkCheckpoint {
+  key       String   @id
+  value     String
+  updatedAt DateTime @updatedAt
 }

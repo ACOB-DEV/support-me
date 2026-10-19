@@ -1,4 +1,5 @@
 import { resetDueGoals } from "./goalService";
+import * as Sentry from "@sentry/node";
 
 const CHECK_INTERVAL_MS = Number(process.env.GOAL_RESET_CHECK_INTERVAL_MS) || 60 * 60 * 1000; // hourly
 
@@ -60,6 +61,9 @@ export class GoalResetScheduler {
       }
     } catch (error) {
       console.error("GoalResetScheduler: tick failed:", (error as Error).message);
+      Sentry.captureException(error, {
+        tags: { component: "GoalResetScheduler" },
+      });
     } finally {
       this.running = false;
     }

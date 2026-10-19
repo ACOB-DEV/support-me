@@ -18,6 +18,7 @@ import { errorHandler } from "./middleware/errorHandler";
 import { requestLogger } from "./middleware/requestLogger";
 import { checkSorobanRpc } from "./services/sorobanHealth";
 import { executorHealth } from "./services/executorHealth";
+import { networkReset } from "./services/networkReset";
 import { getAllowedOrigins } from "./config";
 
 const app = express();
@@ -88,16 +89,24 @@ app.use("/", seoRouter);
 app.get("/health", async (req, res) => {
   const sorobanRpc = await checkSorobanRpc();
   const subscriptionExecutor = executorHealth.getHealth();
+  const network = networkReset.getState();
+  // A detected testnet reset is the most severe state: the backend is running
+  // against a chain that no longer matches its configuration, so report
+  // unhealthy regardless of the other dependencies (#278). The runbook is in
+  // docs/testnet-troubleshooting.md.
   const status =
-    subscriptionExecutor.status === "unhealthy"
+    network.status === "reset_detected"
       ? "unhealthy"
-      : sorobanRpc.status === "ok"
-        ? "ok"
-        : "degraded";
+      : subscriptionExecutor.status === "unhealthy"
+        ? "unhealthy"
+        : sorobanRpc.status === "ok"
+          ? "ok"
+          : "degraded";
   return res.json({
     status,
     timestamp: new Date().toISOString(),
-    dependencies: { sorobanRpc, subscriptionExecutor },
+    network: network.status,
+    dependencies: { sorobanRpc, subscriptionExecutor, network },
   });
 });
 
@@ -120,7 +129,10 @@ app.use("/api/events", eventsRouter);
 app.use("/api/admin", adminRouter);
 app.use("/api/activity", activityRouter);
 app.use("/api/account", accountRouter);
-app.use("/api/email/preview", emailPreviewRouter);
+// Email preview is a developer tool and should not be exposed in production (#272)
+if (process.env.NODE_ENV !== "production" || process.env.EMAIL_PREVIEW_ENABLED === "true") {
+  app.use("/api/email/preview", emailPreviewRouter);
+}
 app.use("/api", seoRouter);
 
 app.use((req, res) => {

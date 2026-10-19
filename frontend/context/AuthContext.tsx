@@ -34,15 +34,23 @@ const AuthContext = createContext<AuthContextType | undefined>(undefined);
 export function AuthProvider({ children }: { children: ReactNode }) {
   const [user, setUser] = useState<User | null>(null);
   const [token, setToken] = useState<string | null>(null);
+  // Starts true and flips to false at the end of the mount effect below, so
+  // it also doubles as the "has the client-only mount effect run yet" flag
+  // (needed to avoid an SSR/hydration mismatch) without a separate `mounted`
+  // state — the two were never observably different.
   const [loading, setLoading] = useState(true);
-  const [mounted, setMounted] = useState(false);
 
   useEffect(() => {
-    setMounted(true);
+    // One-time sync FROM an external system (localStorage) on mount, which is
+    // exactly what effects are for — not a derived-state anti-pattern. This
+    // can't move to a `useState` lazy initializer because `localStorage`
+    // isn't available during SSR; reading it outside an effect would cause a
+    // hydration mismatch.
     const savedToken = localStorage.getItem('authToken');
     const savedUser = localStorage.getItem('authUser');
     if (savedToken && savedUser) {
       try {
+        // eslint-disable-next-line react-hooks/set-state-in-effect -- restoring session state from localStorage on mount, see comment above
         setToken(savedToken);
         setUser(JSON.parse(savedUser));
       } catch {
@@ -67,6 +75,12 @@ export function AuthProvider({ children }: { children: ReactNode }) {
 
   const loginWithWallet = async (): Promise<LoginResult> => {
     const address = await connectWallet();
+    if (!address) {
+      // connectWallet() resolves null when the user closes the wallet picker
+      // without connecting (see lib/wallet.ts) -- categorized as a user
+      // cancellation, not a missing-wallet error.
+      throw new Error('The wallet connection was cancelled.');
+    }
 
     const challengeRes = await fetch(`${API_URL}/api/auth/challenge`, {
       method: 'POST',
@@ -157,7 +171,7 @@ export function AuthProvider({ children }: { children: ReactNode }) {
       value={{
         user,
         token,
-        loading: loading || !mounted,
+        loading,
         loginWithWallet,
         getTwitterRedirectUrl,
         completeTwitterLogin,

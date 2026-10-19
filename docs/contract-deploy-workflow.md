@@ -15,7 +15,7 @@ deployment that changes contracts holding live state.
 - Use a funded Testnet deployer account. For production promotion, use the
   approved admin/multisig process; do not use a developer's personal wallet.
 - Decide the admin addresses, threshold, timelock, and subscription executor
-  before initializing either contract. The executor key must be funded for
+  before deploying either contract; they are fixed by the constructor. The executor key must be funded for
   fees and its public key must be set on the donation contract.
 - Keep secret keys in the Stellar CLI's local key store or the hosting
   provider's secret store. Do not put secrets in shell history, this document,
@@ -48,41 +48,67 @@ build.
 
 ## Deploy to Testnet
 
-Deploy both artifacts first so each initializer can be given the other
-contract's new address. Use the Stellar CLI account alias configured for your
-deployer in place of `<DEPLOYER_KEY>`:
+Both contracts are initialized by their constructor as part of the deploy
+transaction, so there is no separate `initialize` call that someone watching
+the network could front-run. Constructor arguments are passed after `--`:
+
+| Argument | Donation | Registry |
+| --- | --- | --- |
+| `--admins` | JSON array of admin addresses; the first is the primary admin | same |
+| `--threshold` | approvals required for admin proposals (`1` ≤ threshold ≤ admin count) | same |
+| `--timelock_delay` | seconds between proposal and execution | same |
+| other contract | `--registry <REGISTRY_ID>` | `--donation_contract <DONATION_ID>` |
+
+Each contract needs the other's address at construction time. Derive the
+registry ID up front from a deploy salt, deploy the donation contract pointing
+at it, then deploy the registry with that same salt. Use the Stellar CLI
+account alias configured for your deployer in place of `<DEPLOYER_KEY>`:
 
 ```bash
+SALT=$(openssl rand -hex 32)   # record this with the release notes
+
+REGISTRY_ID=$(stellar contract id wasm --salt "$SALT" \
+  --source-account <DEPLOYER_KEY> --network testnet)
+
+DONATION_ID=$(stellar contract deploy \
+  --wasm target/wasm32v1-none/release/donation.wasm \
+  --source-account <DEPLOYER_KEY> --network testnet -- \
+  --admins '["<ADMIN_ADDRESS>"]' --threshold 1 --timelock_delay 0 \
+  --registry "$REGISTRY_ID")
+
 stellar contract deploy \
   --wasm target/wasm32v1-none/release/creator_registry.wasm \
-  --source-account <DEPLOYER_KEY> --network testnet
-
-stellar contract deploy \
-  --wasm target/wasm32v1-none/release/donation.wasm \
-  --source-account <DEPLOYER_KEY> --network testnet
+  --salt "$SALT" \
+  --source-account <DEPLOYER_KEY> --network testnet -- \
+  --admins '["<ADMIN_ADDRESS>"]' --threshold 1 --timelock_delay 0 \
+  --donation_contract "$DONATION_ID"
 ```
 
-Record both returned contract IDs and deployment transaction hashes. For a
-single-admin test deployment, initialize the donation contract with the
-registry ID, then initialize the registry with the donation ID:
+The registry deploy must print the same ID as `$REGISTRY_ID`; if it does not
+(different deployer account, network, or salt), the donation contract points
+at the wrong registry and both must be redeployed. Record both contract IDs
+and deployment transaction hashes.
 
-```bash
-stellar contract invoke --id <DONATION_ID> \
-  --source-account <ADMIN_KEY> --network testnet -- \
-  initialize --admin <ADMIN_ADDRESS> --registry <REGISTRY_ID>
-
-stellar contract invoke --id <REGISTRY_ID> \
-  --source-account <ADMIN_KEY> --network testnet -- \
-  initialize --admin <ADMIN_ADDRESS> --donation_contract <DONATION_ID>
-```
-
-For a multi-admin deployment, call `initialize_multisig` on each contract
-instead, supplying the agreed admin list, threshold, timelock delay, and the
-other contract's address. All listed admins must authorize initialization.
-Follow [`admin-multisig-timelock.md`](admin-multisig-timelock.md) for
+The example above is a single-admin test deployment. For a multi-admin
+deployment, pass the agreed admin list, threshold and timelock delay instead,
+e.g. `--admins '["<ADMIN_1>","<ADMIN_2>","<ADMIN_3>"]' --threshold 2
+--timelock_delay 86400`, using the same values for both contracts. Admins do
+not sign the deploy; the deployer sets the admin set atomically. Follow
+[`admin-multisig-timelock.md`](admin-multisig-timelock.md) for
 multi-signature administration. With a threshold greater than one, configure
 the executor through the `SetExecutor` proposal flow; the direct `set_executor`
 call is only available for a 1-of-1 contract.
+
+Both contracts extend their instance TTL on every state-changing call. During
+long idle periods, schedule a permissionless `bump` call on each contract
+(e.g. from the backend executor) so neither is archived:
+
+```bash
+stellar contract invoke --id <DONATION_ID> \
+  --source-account <EXECUTOR_KEY> --network testnet -- bump
+stellar contract invoke --id <REGISTRY_ID> \
+  --source-account <EXECUTOR_KEY> --network testnet -- bump
+```
 
 ## Verify the deployment
 
@@ -100,8 +126,8 @@ call is only available for a 1-of-1 contract.
    the artifact built for this release when the explorer exposes that value.
    Explorer visibility verifies the on-chain deployment; it is not a substitute
    for an independent source-code audit.
-3. Confirm both initializers succeeded and the donation contract references the
-   intended registry. For the single-admin test setup, configure the executor
+3. Confirm both deploys succeeded, `is_admin` returns `true` for each intended
+   admin, and the donation contract references the intended registry. For the single-admin test setup, configure the executor
    and verify it before using recurring donations:
 
    ```bash
@@ -154,10 +180,11 @@ After verification, update these records in the same release change:
   table in the root `README.md`. Keep prior versions and their addresses for
   history; label the new entries with the release/version and note any interface
   or state-migration caveats.
-- Replace the Testnet sample values for
-  `NEXT_PUBLIC_DONATION_CONTRACT_ID` and
-  `NEXT_PUBLIC_CREATOR_REGISTRY_CONTRACT_ID` in `backend/.env.example` with the
-  newly deployed IDs. Never add a real private key to the example file.
+- Replace the Testnet sample values for `NEXT_PUBLIC_DONATION_CONTRACT_ID`
+  and `NEXT_PUBLIC_CREATOR_REGISTRY_CONTRACT_ID` in `frontend/.env.example`,
+  and for `DONATION_CONTRACT_ID` (backend-scoped; see #302) in
+  `backend/.env.example`, with the newly deployed IDs. Never add a real
+  private key to the example file.
 - Update the corresponding values in local `frontend/.env.local` and
   `backend/.env` files as needed; these files are not deployment configuration
   and must remain untracked.
@@ -174,7 +201,7 @@ and approvals pass. Apply the same new pair of contract IDs together:
   environment. Confirm Preview/Staging values separately rather than copying
   production IDs into every environment by default. Redeploy the frontend so
   the public client is built with the new IDs.
-- **Railway**: update `NEXT_PUBLIC_DONATION_CONTRACT_ID` and
+- **Railway**: update `DONATION_CONTRACT_ID` and
   `NEXT_PUBLIC_CREATOR_REGISTRY_CONTRACT_ID` on the backend service. Set or
   retain `EXECUTOR_SECRET_KEY` only if recurring donations are enabled; its
   public key must match the executor registered on the new donation contract.

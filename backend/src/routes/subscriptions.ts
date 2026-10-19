@@ -11,7 +11,7 @@ const router = Router();
 
 router.get(
   "/",
-  authMiddleware as any,
+  authMiddleware,
   validate({ query: listSubscriptionsQuerySchema }),
   asyncHandler(async (req: AuthRequest, res) => {
     if (!req.user) {
@@ -58,7 +58,7 @@ router.get(
 
 router.post(
   "/",
-  authMiddleware as any,
+  authMiddleware,
   validate({ body: createSubscriptionSchema }),
   asyncHandler(async (req: AuthRequest, res) => {
     const { creatorUsername, supporterAddress, token, amount, intervalSecs, onChainId, subscribeTxHash } =
@@ -106,7 +106,7 @@ router.post(
 
 router.post(
   "/:id/cancel",
-  authMiddleware as any,
+  authMiddleware,
   validate({ params: idParamSchema }),
   asyncHandler(async (req: AuthRequest, res) => {
     if (!req.user) {

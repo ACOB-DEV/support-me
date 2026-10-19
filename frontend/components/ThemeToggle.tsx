@@ -1,7 +1,8 @@
 'use client';
 
 import { useEffect, useState } from 'react';
-import { FiSun, FiMoon } from 'react-icons/fi';
+import { HugeiconsIcon } from '@hugeicons/react';
+import { Sun01Icon, Moon01Icon } from '@hugeicons/core-free-icons';
 import { useTheme } from '@/context/ThemeContext';
 
 // Cycles system → light → dark so the toggle is one tap from any state; the
@@ -38,7 +39,11 @@ export function ThemeToggle({ className = '' }: { className?: string }) {
       title={mounted ? LABEL[theme] : 'Toggle theme'}
       className={`btn-brutal btn-brutal-white !px-3 !py-2 text-sm ${className}`}
     >
-      {mounted && resolvedTheme === 'dark' ? <FiMoon size={18} /> : <FiSun size={18} />}
+      {mounted && resolvedTheme === 'dark' ? (
+        <HugeiconsIcon icon={Moon01Icon} size={18} strokeWidth={2} />
+      ) : (
+        <HugeiconsIcon icon={Sun01Icon} size={18} strokeWidth={2} />
+      )}
     </button>
   );
 }

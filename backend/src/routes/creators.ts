@@ -1,5 +1,5 @@
 import { Router } from "express";
-import { Prisma } from "@prisma/client";
+import { Prisma, Creator } from "@prisma/client";
 import prisma from "../prisma";
 import { authMiddleware, AuthRequest } from "../middleware/auth";
 import { asyncHandler } from "../middleware/asyncHandler";
@@ -13,7 +13,14 @@ import {
   updateThemeSchema,
   usernameParamSchema,
 } from "../schemas/creators";
-import { ConflictError, NotFoundError, UnauthorizedError } from "../errors/AppError";
+import {
+  ConflictError,
+  ForbiddenError,
+  NotFoundError,
+  UnauthorizedError,
+} from "../errors/AppError";
+import { challenges } from "./auth";
+import { verifyWalletOwnership } from "../services/walletProof";
 import { TtlCache } from "../services/ttlCache";
 import { toAmount } from "../lib/money";
 import { getCreatorStats } from "../services/creatorStats";
@@ -23,7 +30,7 @@ const router = Router();
 // Cache creator profile lookups by username with a 5-minute TTL.
 // Profiles change infrequently, so this reduces DB load while staying fresh.
 // Exported so tests can reset it between cases.
-export const creatorProfileCache = new TtlCache<any>(5 * 60 * 1000);
+export const creatorProfileCache = new TtlCache<Creator>(5 * 60 * 1000);
 
 interface LeaderboardEntry {
   rank: number;
@@ -48,6 +55,44 @@ interface SupporterLeaderboardEntry extends LeaderboardEntry {
 // donation's-eye-view of "shortly after it happened". Exported so tests
 // can reset it between cases instead of sharing state across the file.
 export const leaderboardCache = new TtlCache<{ entries: LeaderboardEntry[]; total: number }>(30_000);
+
+const WALLET_TAKEN_MESSAGE = "This wallet address is already linked to another creator profile";
+
+// A creator profile may only be tied to a wallet its owner has proven control
+// of (#276): either the wallet they signed in with, or another wallet for
+// which they present a signature over a fresh /api/auth/challenge message.
+function assertWalletOwnership(
+  user: NonNullable<AuthRequest["user"]>,
+  walletAddress: string,
+  walletSignature: string | undefined
+): void {
+  if (walletAddress === user.walletAddress) return;
+  if (!walletSignature) {
+    throw new ForbiddenError(
+      "Prove you control this wallet: sign a message from /api/auth/challenge and send it as walletSignature"
+    );
+  }
+  verifyWalletOwnership(challenges, walletAddress, walletSignature);
+}
+
+// Two profiles must never share a payout wallet: donations and the
+// goal-update reconciliation are keyed by wallet address.
+async function assertWalletAvailable(walletAddress: string, excludeCreatorId?: number) {
+  const holder = await prisma.creator.findFirst({
+    where: {
+      walletAddress,
+      ...(excludeCreatorId === undefined ? {} : { id: { not: excludeCreatorId } }),
+    },
+    select: { id: true },
+  });
+  if (holder) {
+    throw new ConflictError(WALLET_TAKEN_MESSAGE);
+  }
+}
+
+function isUniqueViolation(err: unknown): boolean {
+  return err instanceof Prisma.PrismaClientKnownRequestError && err.code === "P2002";
+}
 
 // Discovery/search: browse creators by name or username, sorted by newest
 // or by donation count ("most supported" — a currency-agnostic proxy for
@@ -104,7 +149,7 @@ router.get(
 
 router.get(
   "/me",
-  authMiddleware as any,
+  authMiddleware,
   asyncHandler(async (req: AuthRequest, res) => {
     if (!req.user) {
       throw new UnauthorizedError("User not authenticated");
@@ -123,7 +168,7 @@ router.get(
 // over all verified donations, not just the page the dashboard has loaded.
 router.get(
   "/me/stats",
-  authMiddleware as any,
+  authMiddleware,
   asyncHandler(async (req: AuthRequest, res) => {
     if (!req.user) {
       throw new UnauthorizedError("User not authenticated");
@@ -247,11 +292,11 @@ router.get(
 
 router.post(
   "/:username/create",
-  authMiddleware as any,
+  authMiddleware,
   validate({ params: createCreatorParamsSchema, body: createCreatorSchema }),
   asyncHandler(async (req: AuthRequest, res) => {
     const { username } = req.params;
-    const { walletAddress, displayName, bio, avatarUrl } = req.body;
+    const { walletAddress, walletSignature, displayName, bio, avatarUrl } = req.body;
 
     if (!req.user) {
       throw new UnauthorizedError("User not authenticated");
@@ -269,16 +314,31 @@ router.post(
       throw new ConflictError("User already has a creator profile");
     }
 
-    const creator = await prisma.creator.create({
-      data: {
-        userId: req.user.id,
-        username,
-        walletAddress: walletAddress || "",
-        displayName,
-        bio,
-        avatarUrl,
-      },
-    });
+    // Default to the wallet the user signed in with; a magic-link/OAuth user
+    // with no wallet yet gets "" (payout wallet connected later).
+    const payoutWallet: string = walletAddress || req.user.walletAddress || "";
+    if (payoutWallet) {
+      assertWalletOwnership(req.user, payoutWallet, walletSignature);
+      await assertWalletAvailable(payoutWallet);
+    }
+
+    let creator: Creator;
+    try {
+      creator = await prisma.creator.create({
+        data: {
+          userId: req.user.id,
+          username,
+          walletAddress: payoutWallet,
+          displayName,
+          bio,
+          avatarUrl,
+        },
+      });
+    } catch (err) {
+      // Lost a race with another request claiming the same wallet.
+      if (isUniqueViolation(err)) throw new ConflictError(WALLET_TAKEN_MESSAGE);
+      throw err;
+    }
 
     return res.status(201).json(creator);
   })
@@ -286,11 +346,11 @@ router.post(
 
 router.put(
   "/:username",
-  authMiddleware as any,
+  authMiddleware,
   validate({ params: usernameParamSchema, body: updateCreatorSchema }),
   asyncHandler(async (req: AuthRequest, res) => {
     const { username } = req.params;
-    const updates = req.body;
+    const { walletSignature, ...updates } = req.body;
 
     if (!req.user) {
       throw new UnauthorizedError("User not authenticated");
@@ -307,10 +367,23 @@ router.put(
       throw new UnauthorizedError("You can only edit your own profile");
     }
 
-    const creator = await prisma.creator.update({
-      where: { username },
-      data: updates,
-    });
+    // Re-pointing the payout wallet needs proof of control and must not
+    // collide with another profile.
+    if (updates.walletAddress !== undefined && updates.walletAddress !== existing.walletAddress) {
+      assertWalletOwnership(req.user, updates.walletAddress, walletSignature);
+      await assertWalletAvailable(updates.walletAddress, existing.id);
+    }
+
+    let creator: Creator;
+    try {
+      creator = await prisma.creator.update({
+        where: { username },
+        data: updates,
+      });
+    } catch (err) {
+      if (isUniqueViolation(err)) throw new ConflictError(WALLET_TAKEN_MESSAGE);
+      throw err;
+    }
 
     // Invalidate cache when profile is updated
     creatorProfileCache.clear();
@@ -322,7 +395,7 @@ router.put(
 // Saves (or, with `theme: null`, resets) the creator's public profile theme.
 router.patch(
   "/:username/theme",
-  authMiddleware as any,
+  authMiddleware,
   validate({ params: usernameParamSchema, body: updateThemeSchema }),
   asyncHandler(async (req: AuthRequest, res) => {
     const { username } = req.params;

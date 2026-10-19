@@ -6,19 +6,44 @@ import { signTransaction as signWithWallet } from './wallet';
 // Stellar Reference Token (SRT) and fakes KYC — no signup, cost, or
 // partnership required. Point NEXT_PUBLIC_ANCHOR_* at a real NGN anchor to
 // go live; the code below is identical either way.
-const HOME_DOMAIN =
-  process.env.NEXT_PUBLIC_ANCHOR_HOME_DOMAIN || 'testanchor.stellar.org';
+const HOME_DOMAIN = process.env.NEXT_PUBLIC_ANCHOR_HOME_DOMAIN || 'testanchor.stellar.org';
 const ASSET_CODE = process.env.NEXT_PUBLIC_ANCHOR_ASSET_CODE || 'SRT';
-const RPC_URL =
-  process.env.NEXT_PUBLIC_SOROBAN_RPC_URL || 'https://soroban-testnet.stellar.org';
 const NETWORK_PASSPHRASE = StellarSdk.Networks.TESTNET;
 
 const horizon = new StellarSdk.Horizon.Server('https://horizon-testnet.stellar.org');
 
-// Error the settings UI can surface directly. `step` says where the flow
-// stopped so we can show a useful message without leaking internals.
+/** Resolved SEP-24/SEP-10 endpoints and asset metadata for one anchor. */
+export interface AnchorConfig {
+  homeDomain: string;
+  assetCode: string;
+  assetIssuer: string;
+  transferServer: string;
+  webAuthEndpoint: string;
+  signingKey: string;
+}
+
+/** The withdrawal payment instructions carried on a SEP-24 transaction once
+ * the anchor reaches `pending_user_transfer_start`. */
+export interface WithdrawPaymentInstructions {
+  withdraw_anchor_account?: string;
+  amount_in?: string;
+  withdraw_memo?: string;
+  withdraw_memo_type?: 'hash' | 'id' | 'text';
+}
+
+/** The subset of a SEP-24 `/transaction` response the withdraw flow reads. */
+export interface AnchorTransaction extends WithdrawPaymentInstructions {
+  status: string;
+  [key: string]: unknown;
+}
+
+/** Error the settings UI can surface directly. `step` says where the flow
+ * stopped so we can show a useful message without leaking internals. */
 export class AnchorError extends Error {
-  constructor(step, message, cause) {
+  step: string;
+  cause?: unknown;
+
+  constructor(step: string, message: string, cause?: unknown) {
     super(message);
     this.name = 'AnchorError';
     this.step = step;
@@ -29,22 +54,27 @@ export class AnchorError extends Error {
 /**
  * Read the anchor's stellar.toml and pull the endpoints + the issuer for the
  * asset we're withdrawing. Kept pure (no wallet, no popup) so it's unit-testable.
- * @param {string} [homeDomain]
- * @param {string} [assetCode]
  */
-export async function loadAnchorConfig(homeDomain = HOME_DOMAIN, assetCode = ASSET_CODE) {
+export async function loadAnchorConfig(
+  homeDomain: string = HOME_DOMAIN,
+  assetCode: string = ASSET_CODE
+): Promise<AnchorConfig> {
   // The TOML resolver is HTTPS-only by default. A local dev anchor is served
   // over plain http://localhost:8080, so allow cleartext ONLY for localhost —
   // never for a real anchor, where http would be an unacceptable downgrade.
   const isLocal = /^(localhost|127\.0\.0\.1)(:\d+)?$/.test(homeDomain);
-  let toml;
+  let toml: Awaited<ReturnType<typeof StellarSdk.StellarToml.Resolver.resolve>>;
   try {
     toml = await StellarSdk.StellarToml.Resolver.resolve(
       homeDomain,
-      isLocal ? { allowHttp: true } : undefined,
+      isLocal ? { allowHttp: true } : undefined
     );
   } catch (err) {
-    throw new AnchorError('toml', `Could not read the anchor's stellar.toml for ${homeDomain}.`, err);
+    throw new AnchorError(
+      'toml',
+      `Could not read the anchor's stellar.toml for ${homeDomain}.`,
+      err
+    );
   }
 
   const transferServer = toml.TRANSFER_SERVER_SEP0024;
@@ -53,12 +83,15 @@ export async function loadAnchorConfig(homeDomain = HOME_DOMAIN, assetCode = ASS
   const currency = (toml.CURRENCIES || []).find((c) => c.code === assetCode);
 
   if (!transferServer) {
-    throw new AnchorError('toml', `Anchor ${homeDomain} does not advertise a SEP-24 transfer server.`);
+    throw new AnchorError(
+      'toml',
+      `Anchor ${homeDomain} does not advertise a SEP-24 transfer server.`
+    );
   }
   if (!webAuthEndpoint || !signingKey) {
     throw new AnchorError('toml', `Anchor ${homeDomain} does not advertise SEP-10 web auth.`);
   }
-  if (!currency) {
+  if (!currency || !currency.issuer) {
     throw new AnchorError('toml', `Anchor ${homeDomain} does not list asset ${assetCode}.`);
   }
 
@@ -85,8 +118,8 @@ export async function loadAnchorConfig(homeDomain = HOME_DOMAIN, assetCode = ASS
  * flow. Freighter on testnet uses a `G...` account, so SEP-10 is sufficient
  * for the current flow.
  */
-export async function authenticate(config, account) {
-  let challengeXdr;
+export async function authenticate(config: AnchorConfig, account: string): Promise<string> {
+  let challengeXdr: string;
   try {
     const res = await fetch(
       `${config.webAuthEndpoint}?account=${encodeURIComponent(account)}&home_domain=${encodeURIComponent(config.homeDomain)}`
@@ -95,15 +128,23 @@ export async function authenticate(config, account) {
     if (!res.ok) throw new Error(json.error || 'challenge request failed');
     challengeXdr = json.transaction;
   } catch (err) {
-    throw new AnchorError('auth-challenge', 'Could not get a sign-in challenge from the anchor.', err);
+    throw new AnchorError(
+      'auth-challenge',
+      'Could not get a sign-in challenge from the anchor.',
+      err
+    );
   }
 
-  let signedXdr;
+  let signedXdr: string;
   try {
     const result = await signWithWallet(challengeXdr, account);
     signedXdr = result.signedTxXdr;
   } catch (err) {
-    throw new AnchorError('auth-sign', 'Signing the anchor sign-in challenge was cancelled or failed.', err);
+    throw new AnchorError(
+      'auth-sign',
+      'Signing the anchor sign-in challenge was cancelled or failed.',
+      err
+    );
   }
 
   try {
@@ -120,13 +161,19 @@ export async function authenticate(config, account) {
   }
 }
 
+interface AnchorInfoResponse {
+  withdraw?: Record<string, { enabled?: boolean }>;
+  deposit?: Record<string, { enabled?: boolean }>;
+  [key: string]: unknown;
+}
+
 /** Confirm the anchor supports withdraw for our asset (and isn't disabled). */
-export async function assertWithdrawEnabled(config) {
-  let info;
+export async function assertWithdrawEnabled(config: AnchorConfig): Promise<AnchorInfoResponse> {
+  let info: AnchorInfoResponse;
   try {
     const res = await fetch(`${config.transferServer}/info`);
     info = await res.json();
-    if (!res.ok) throw new Error(info.error || 'info request failed');
+    if (!res.ok) throw new Error((info as { error?: string }).error || 'info request failed');
   } catch (err) {
     throw new AnchorError('info', "Could not read the anchor's /info.", err);
   }
@@ -138,12 +185,12 @@ export async function assertWithdrawEnabled(config) {
 }
 
 /** Confirm the anchor supports deposit for our asset (and isn't disabled). */
-export async function assertDepositEnabled(config) {
-  let info;
+export async function assertDepositEnabled(config: AnchorConfig): Promise<AnchorInfoResponse> {
+  let info: AnchorInfoResponse;
   try {
     const res = await fetch(`${config.transferServer}/info`);
     info = await res.json();
-    if (!res.ok) throw new Error(info.error || 'info request failed');
+    if (!res.ok) throw new Error((info as { error?: string }).error || 'info request failed');
   } catch (err) {
     throw new AnchorError('info', "Could not read the anchor's /info.", err);
   }
@@ -158,7 +205,11 @@ export async function assertDepositEnabled(config) {
  * POST /transactions/withdraw/interactive → the anchor returns a hosted URL
  * (KYC + bank details) and a transaction id we poll on.
  */
-export async function initiateWithdraw(config, authToken, account) {
+export async function initiateWithdraw(
+  config: AnchorConfig,
+  authToken: string,
+  account: string
+): Promise<{ url: string; id: string }> {
   try {
     const res = await fetch(`${config.transferServer}/transactions/withdraw/interactive`, {
       method: 'POST',
@@ -183,7 +234,11 @@ export async function initiateWithdraw(config, authToken, account) {
  * the user never signs an on-chain payment (unlike withdraw), which is why the
  * deposit flow is simpler.
  */
-export async function initiateDeposit(config, authToken, account) {
+export async function initiateDeposit(
+  config: AnchorConfig,
+  authToken: string,
+  account: string
+): Promise<{ url: string; id: string }> {
   try {
     const res = await fetch(`${config.transferServer}/transactions/deposit/interactive`, {
       method: 'POST',
@@ -201,6 +256,12 @@ export async function initiateDeposit(config, authToken, account) {
   }
 }
 
+export interface InteractiveHandle {
+  close: () => void;
+  /** Resolves if the popup posts back or is closed; never rejects — purely an accelerator. */
+  onDone: Promise<void>;
+}
+
 /**
  * Open the anchor's interactive flow. MUST be called synchronously from the
  * user's click, or the browser blocks the popup. Returns a handle the caller
@@ -209,21 +270,23 @@ export async function initiateDeposit(config, authToken, account) {
  * open the URL as a full tab (severing `window.opener`) rather than a popup,
  * in which case no message is ever delivered back. The authoritative signal
  * for completion is polling the anchor's transaction status, not this handle.
- *
- * @param {string} url anchor interactive URL
- * @returns {{ close: () => void, onDone: Promise<void> }}
- *   `onDone` resolves if the popup posts back or is closed; it never rejects
- *   and is purely an accelerator — polling still drives the flow.
  */
-export function openInteractive(url) {
-  const target = window.open(`${url}&callback=postMessage`, 'supportme_transfer', 'popup,width=450,height=750');
+export function openInteractive(url: string): InteractiveHandle {
+  const target = window.open(
+    `${url}&callback=postMessage`,
+    'supportme_transfer',
+    'popup,width=450,height=750'
+  );
   if (!target) {
-    throw new AnchorError('popup', 'The anchor window was blocked. Allow popups for this site and try again.');
+    throw new AnchorError(
+      'popup',
+      'The anchor window was blocked. Allow popups for this site and try again.'
+    );
   }
 
-  let cleanup = () => {};
-  const onDone = new Promise((resolve) => {
-    const onMessage = (event) => {
+  let cleanup = (): void => {};
+  const onDone = new Promise<void>((resolve) => {
+    const onMessage = (event: MessageEvent): void => {
       if (!event.data?.transaction) return;
       resolve();
     };
@@ -258,13 +321,20 @@ export function openInteractive(url) {
  * the anchor-provided memo. Build that payment, sign it with the wallet, and
  * submit to Horizon.
  */
-export async function sendWithdrawPayment(config, account, tx) {
+export async function sendWithdrawPayment(
+  config: AnchorConfig,
+  account: string,
+  tx: WithdrawPaymentInstructions
+): Promise<string> {
   const { withdraw_anchor_account, amount_in, withdraw_memo, withdraw_memo_type } = tx;
   if (!withdraw_anchor_account || !amount_in) {
-    throw new AnchorError('payment', 'The anchor did not return payment instructions for this withdrawal.');
+    throw new AnchorError(
+      'payment',
+      'The anchor did not return payment instructions for this withdrawal.'
+    );
   }
 
-  let source;
+  let source: StellarSdk.Account;
   try {
     source = await horizon.loadAccount(account);
   } catch (err) {
@@ -299,7 +369,7 @@ export async function sendWithdrawPayment(config, account, tx) {
 
   const built = builder.build();
 
-  let signedXdr;
+  let signedXdr: string;
   try {
     const result = await signWithWallet(built.toXDR(), account);
     signedXdr = result.signedTxXdr;
@@ -316,19 +386,21 @@ export async function sendWithdrawPayment(config, account, tx) {
     // common ones as plain language instead of a generic "submit failed" that
     // forces the user into DevTools. op_underfunded is the usual one: the
     // anchor asked for more than the account holds.
-    const ops = err?.response?.data?.extras?.result_codes?.operations || [];
+    const ops: string[] =
+      (err as { response?: { data?: { extras?: { result_codes?: { operations?: string[] } } } } })
+        ?.response?.data?.extras?.result_codes?.operations || [];
     if (ops.includes('op_underfunded')) {
       throw new AnchorError(
         'payment-submit',
         `Your ${config.assetCode} balance is too low to send ${amount_in} ${config.assetCode} for this withdrawal.`,
-        err,
+        err
       );
     }
     if (ops.includes('op_no_trust') || ops.includes('op_no_issuer')) {
       throw new AnchorError(
         'payment-submit',
         `Your account can't send ${config.assetCode} to the anchor — the ${config.assetCode} trustline is missing.`,
-        err,
+        err
       );
     }
     throw new AnchorError('payment-submit', 'Failed to submit the withdrawal payment to the network.', err);
@@ -342,8 +414,8 @@ export async function sendWithdrawPayment(config, account, tx) {
  * Idempotent-ish: if the trustline already exists this is a harmless no-op
  * change, but callers only invoke it when the anchor asks (pending_trust).
  */
-export async function ensureTrustline(config, account) {
-  let source;
+export async function ensureTrustline(config: AnchorConfig, account: string): Promise<string> {
+  let source: StellarSdk.Account;
   try {
     source = await horizon.loadAccount(account);
   } catch (err) {
@@ -359,12 +431,16 @@ export async function ensureTrustline(config, account) {
     .setTimeout(180)
     .build();
 
-  let signedXdr;
+  let signedXdr: string;
   try {
     const result = await signWithWallet(built.toXDR(), account);
     signedXdr = result.signedTxXdr;
   } catch (err) {
-    throw new AnchorError('trustline-sign', `Signing the ${config.assetCode} trustline was cancelled or failed.`, err);
+    throw new AnchorError(
+      'trustline-sign',
+      `Signing the ${config.assetCode} trustline was cancelled or failed.`,
+      err
+    );
   }
 
   try {
@@ -372,7 +448,11 @@ export async function ensureTrustline(config, account) {
     const res = await horizon.submitTransaction(signedTx);
     return res.hash;
   } catch (err) {
-    throw new AnchorError('trustline-submit', `Failed to add the ${config.assetCode} trustline on the network.`, err);
+    throw new AnchorError(
+      'trustline-submit',
+      `Failed to add the ${config.assetCode} trustline on the network.`,
+      err
+    );
   }
 }
 
@@ -381,22 +461,28 @@ export async function ensureTrustline(config, account) {
 // SEP-24, so it's intentionally not here.)
 const TERMINAL_STATUSES = ['completed', 'refunded', 'error', 'expired'];
 
+export interface PollWithdrawOptions {
+  onStatus?: (status: string, tx: AnchorTransaction) => void | Promise<void>;
+  intervalMs?: number;
+  timeoutMs?: number;
+}
+
 /**
  * Poll GET /transaction?id= until the withdrawal reaches a terminal status.
  * Calls onStatus with each new status so the UI can show progress
  * (incomplete → pending_user_transfer_start → pending_anchor → completed).
- *
- * @param {object} config
- * @param {string} authToken
- * @param {string} id
- * @param {{ onStatus?: (status: string, tx: any) => void | Promise<void>, intervalMs?: number, timeoutMs?: number }} [opts]
  */
-export async function pollWithdraw(config, authToken, id, { onStatus, intervalMs = 3000, timeoutMs = 300000 } = {}) {
+export async function pollWithdraw(
+  config: AnchorConfig,
+  authToken: string,
+  id: string,
+  { onStatus, intervalMs = 3000, timeoutMs = 300000 }: PollWithdrawOptions = {}
+): Promise<AnchorTransaction> {
   const start = Date.now();
-  let last = null;
+  let last: string | null = null;
 
   while (Date.now() - start < timeoutMs) {
-    let tx;
+    let tx: AnchorTransaction;
     try {
       const res = await fetch(`${config.transferServer}/transaction?id=${encodeURIComponent(id)}`, {
         headers: { Authorization: `Bearer ${authToken}` },
@@ -424,6 +510,10 @@ export async function pollWithdraw(config, authToken, id, { onStatus, intervalMs
   throw new AnchorError('poll-timeout', 'Timed out waiting for the anchor to finish the withdrawal.');
 }
 
+export interface RunFlowOptions {
+  onStatus?: (status: string, detail?: unknown) => void;
+}
+
 /**
  * Full SEP-24 withdraw, start to finish. `onStatus(phase, detail)` fires at
  * each step so the settings panel can narrate progress. Opens the anchor's
@@ -431,7 +521,10 @@ export async function pollWithdraw(config, authToken, id, { onStatus, intervalMs
  * on-chain payment to the anchor when it asks for the transfer. Returns the
  * terminal anchor transaction, or null if it timed out / was abandoned.
  */
-export async function runWithdraw(account, { onStatus } = {}) {
+export async function runWithdraw(
+  account: string,
+  { onStatus }: RunFlowOptions = {}
+): Promise<AnchorTransaction> {
   onStatus?.('config');
   const config = await loadAnchorConfig();
 
@@ -478,7 +571,10 @@ export async function runWithdraw(account, { onStatus } = {}) {
  * test SRT into a wallet (fake KYC in the popup). Returns the terminal anchor
  * transaction, or null if the user closed the popup before completing.
  */
-export async function runDeposit(account, { onStatus } = {}) {
+export async function runDeposit(
+  account: string,
+  { onStatus }: RunFlowOptions = {}
+): Promise<AnchorTransaction> {
   onStatus?.('config');
   const config = await loadAnchorConfig();
 

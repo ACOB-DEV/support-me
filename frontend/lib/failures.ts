@@ -31,6 +31,9 @@ export const FAILURE_TITLES = {
   confirmationTimedOut: 'Confirmation timed out',
   transactionFailed: 'Transaction failed',
   networkError: 'Network error',
+  accountNotFunded: 'Account not funded',
+  testnetReset: 'Testnet reset',
+  missingTrustline: 'Missing trustline',
   donate: 'Donation failed',
   subscribe: "Couldn't start subscription",
   cancel: "Couldn't cancel subscription",
@@ -38,6 +41,7 @@ export const FAILURE_TITLES = {
 
 const INSUFFICIENT_PATTERN = /insufficient|underfunded|allowance/i;
 const TIMEOUT_PATTERN = /timed out|did not confirm|confirmation/i;
+const TRUSTLINE_PATTERN = /no trustline|trustline missing|line not found|asset not trusted/i;
 
 const FLOW_TITLES: Record<DonationFlow, string> = {
   donate: FAILURE_TITLES.donate,
@@ -69,6 +73,14 @@ function describeFailureCopy(err: unknown, flow: 'donate' | 'subscribe'): Omit<F
           message:
             "Your wallet doesn't have enough to cover this amount plus the network fee.",
           action: 'Lower the amount or add funds to your wallet, then try again.',
+          retryable: true,
+        };
+      }
+      if (TRUSTLINE_PATTERN.test(err.message || '')) {
+        return {
+          title: FAILURE_TITLES.missingTrustline,
+          message: `Your wallet doesn't have a trustline for this asset. You need to add a trustline before you can hold or send it.`,
+          action: 'Add the trustline from the donate card, then try again.',
           retryable: true,
         };
       }
@@ -105,6 +117,24 @@ function describeFailureCopy(err: unknown, flow: 'donate' | 'subscribe'): Omit<F
         message: err.message || "The Stellar network could not be reached.",
         action: 'Check your connection (the offline banner shows your status), then try again.',
         retryable: true,
+      };
+    }
+
+    if (err.type === 'unfunded') {
+      return {
+        title: FAILURE_TITLES.accountNotFunded,
+        message: 'Your wallet does not exist on the network yet. It needs to be funded first.',
+        action: 'Use the Fund with Friendbot button to add testnet funds to your wallet.',
+        retryable: true,
+      };
+    }
+
+    if (err.type === 'reset') {
+      return {
+        title: FAILURE_TITLES.testnetReset,
+        message: 'The Stellar Testnet was reset. The deployed contracts have been removed.',
+        action: 'Check back later — the demo is being redeployed.',
+        retryable: false,
       };
     }
   }

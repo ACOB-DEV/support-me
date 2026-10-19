@@ -64,8 +64,8 @@ test.describe('Authentication Flows', () => {
     await page.goto('/app');
 
     // 2. ProtectedRoute renders barrier
-    await expect(page.getByRole('heading', { name: 'Connect Your Wallet' })).toBeVisible();
-    await expect(page.getByText('Sign in by connecting your Stellar wallet')).toBeVisible();
+    await expect(page.getByRole('heading', { name: 'Sign In' })).toBeVisible();
+    await expect(page.getByText('Connect your Stellar wallet, sign in with Twitter, or use a magic link.')).toBeVisible();
 
     // 3. Click "Connect Wallet" on the barrier
     await page.getByRole('button', { name: 'Connect Wallet' }).click();

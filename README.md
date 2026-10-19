@@ -4,7 +4,7 @@
 
 SupportMe is a creator tipping and donation platform. This enables creators on Stellar to receive donations and tips easily through embedded widgets or shareable links.
 
-**Live demo**: [https://support-mee.vercel.app/](https://support-mee.vercel.app/) · **Demo video**: [Loom](https://www.loom.com/share/4468e89fd67745d39fb64033e6660b16)
+**Live demo**: [https://support-mee.vercel.app/](https://support-mee.vercel.app/) · **Demo video**: [Loom](https://www.loom.com/share/4468e89fd67745d39fb64033e6660b16) · **Testnet demo walkthrough**: [docs/testnet-demo-walkthrough.md](docs/testnet-demo-walkthrough.md)
 
 ## Architecture
 
@@ -87,16 +87,17 @@ checklist, see [`docs/contract-deploy-workflow.md`](docs/contract-deploy-workflo
   - `cancel_subscription` (revokes the remaining allowance in the same tx): [`34d9c3d8d544cfdb390228a82372d64755c8f479fca4d959bb4e47b9ec0a4414`](https://stellar.expert/explorer/testnet/tx/34d9c3d8d544cfdb390228a82372d64755c8f479fca4d959bb4e47b9ec0a4414)
 
 **The live demo (support-mee.vercel.app) still runs on v1.** A fresh local
-checkout's `.env.local` and `backend/.env.example` now default to the v2
-addresses above (both v2 contracts are live on testnet and were confirmed
-reachable via `stellar contract info interface` — same public interface
-shape as v1, so this is a drop-in swap, not a breaking change for any
-existing caller). Promoting the *live* demo to v2 is still a manual,
+checkout's `frontend/.env.example` and `backend/.env.example` now default to
+the v2 addresses above (both v2 contracts are live on testnet and were
+confirmed reachable via `stellar contract info interface` — same public
+interface shape as v1, so this is a drop-in swap, not a breaking change for
+any existing caller). Promoting the *live* demo to v2 is still a manual,
 deliberate step: update `NEXT_PUBLIC_DONATION_CONTRACT_ID`/
 `NEXT_PUBLIC_CREATOR_REGISTRY_CONTRACT_ID` on Vercel and set
-`EXECUTOR_SECRET_KEY` on Railway (see "What's New (v5)" above). That
-production repoint is intentionally left for a maintainer to trigger, not
-done as part of an automated change — flipping a live, user-facing
+`DONATION_CONTRACT_ID` (backend) plus `EXECUTOR_SECRET_KEY` on Railway (see
+"What's New (v5)" above). That production repoint is intentionally left for
+a maintainer to trigger, not done as part of an automated change — flipping
+a live, user-facing
 deployment's contract addresses is a deliberate release action.
 
 The frontend calls the `donation` contract directly from
@@ -237,7 +238,10 @@ only reachable through the `donation` contract's cross-contract calls.
 
 ### Prerequisites
 
-- Node.js 18+
+- Node.js 20 (see [`.nvmrc`](.nvmrc); `nvm use` picks it up automatically) and
+  npm 11+ for the frontend, npm 10+ for the backend (`npm install -g npm@11`
+  if your Node install bundles an older npm — the frontend's lockfile needs
+  npm 11's resolver).
 - PostgreSQL
 - A Stellar wallet browser extension (Freighter, xBull, Albedo, Rabet, or Lobstr)
 
@@ -395,8 +399,8 @@ the email provider — are in [`docs/authentication.md`](docs/authentication.md)
 
 - `GET /api/donations` - List donations (query: `creatorUsername`, `page`, and `limit`; default limit 20, maximum 100)
 - `POST /api/donations` - Record a donation (requires an `Idempotency-Key` header; keys are retained for 24 hours)
-  - Body: `{ creatorUsername, senderAddress, amount, message, transactionHash }` (the listener derives operation/event indices from RPC)
-  - When an on-chain transaction hash is supplied, the record is upserted by the durable on-chain identity rather than inserted again on replay. Browser-reported rows are provisional until the listener verifies the event.
+  - Body: `{ creatorUsername, senderAddress, amount, message, transactionHash }` (the listener derives operation/event indices from RPC). `transactionHash` is required — a hash-less report is rejected with `400` rather than stored as a verifiable donation.
+  - The record is upserted by the durable on-chain identity rather than inserted again on replay. Client-reported rows are always stored `verified: false` (only the listener / subscription executor sets `verified: true`), so they stay out of the verified-only feed until verified.
 
 ### Subscriptions (recurring donations)
 
@@ -446,7 +450,9 @@ NODE_ENV=development
 
 # Optional: enables the Soroban event listener that powers /api/events (SSE).
 # Without this set, the backend logs a warning and skips event polling.
-NEXT_PUBLIC_DONATION_CONTRACT_ID=CD6T563YCSYQHDMXC7VCFTKMWMXWHFHAU4NO7EAMFK57QLFI7SSXICYY
+# v2 (adds recurring donations/subscriptions) - matches the frontend's
+# NEXT_PUBLIC_DONATION_CONTRACT_ID below.
+DONATION_CONTRACT_ID=CAO2UABEB4A3EYFTWCMOSTFAUZ5FBSFRESQGWQHOLASZ3RHDCQHQG2LP
 # Prefer a comma-separated failover pool. The singular setting remains supported.
 # SOROBAN_RPC_URLS=https://soroban-testnet.stellar.org,https://backup-soroban.example/rpc
 # SOROBAN_RPC_URL=https://soroban-testnet.stellar.org
@@ -615,16 +621,25 @@ npm test
 
 [`.github/workflows/ci.yml`](.github/workflows/ci.yml) runs independent jobs on every push and pull request to `main`, tied together by a single required `test-all` status check:
 
-- **Contracts**: `cargo test --workspace` for all three crates, then a release build to
+- **Contracts**: `cargo fmt --all -- --check`, `cargo test --workspace` for all three crates,
+  `cargo clippy --workspace --all-targets -- -D warnings`, then a release build to
   `wasm32v1-none` to confirm both contracts still compile to WASM.
-- **Backend**: `npm run build` (Prisma client generation + `tsc`), then
+- **Backend**: `npm run lint` (ESLint, flat config), `npm run build` (Prisma client generation + `tsc`), then
   `npm test`.
-- **Frontend**: `npx tsc --noEmit`, then `npm test`, then `npm run build`.
+- **Frontend**: `npx tsc --noEmit`, `npm run lint` (ESLint, flat config), then `npm test`, then `npm run build`.
+- **Dependency Review**: On pull requests, GitHub's Dependency Review Action fails the check if the
+  dependency changes in that PR introduce a new high-severity (or above) vulnerability; it does not
+  re-flag vulnerabilities that already exist in `main`'s dependency tree.
 - **Type Drift**: Verifies that changes to shared contract types (`contracts/common/src/lib.rs`) are accompanied by frontend TypeScript updates.
 - **All tests passed**: A single job depending on all the above to provide a unified 'all green' status for branch protection.
 None of the jobs require real secrets or a live database — backend tests
 mock Prisma, and the Prisma client can be generated from `schema.prisma`
 without a reachable `DATABASE_URL`.
+
+[`.github/dependabot.yml`](.github/dependabot.yml) opens weekly update pull requests for npm in
+`frontend/` and `backend/`, the root Cargo workspace, and the GitHub Actions workflows themselves;
+minor/patch updates within each ecosystem are grouped into one pull request instead of one per
+dependency.
 
 ## Deployment
 

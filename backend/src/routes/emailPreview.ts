@@ -1,5 +1,5 @@
 import { Router, Request, Response } from "express";
-import { emailService, EmailTemplateName } from "../services/email/emailService";
+import { emailService, EmailTemplateName, TemplateContextMap } from "../services/email/emailService";
 import { NotFoundError } from "../errors/AppError";
 
 const router = Router();
@@ -115,6 +115,8 @@ router.get("/", (req: Request, res: Response) => {
 </html>`;
 
   res.setHeader("Content-Type", "text/html; charset=utf-8");
+  res.setHeader("X-Robots-Tag", "noindex");
+  res.setHeader("Content-Security-Policy", "default-src 'self'; style-src 'unsafe-inline'");
   return res.send(indexHtml);
 });
 
@@ -134,7 +136,14 @@ router.get("/:template", (req: Request, res: Response) => {
   }
 
   const context = generator(req.query);
-  const rendered = emailService.render(template as EmailTemplateName, context as any);
+  // `template` is a runtime-checked key into `mockGenerators` (validated by
+  // the `!generator` check above), so the specific `TemplateContextMap`
+  // member it maps to can't be narrowed from a plain `string` — mirrors the
+  // per-branch casts `EmailService.render` itself already uses internally.
+  const rendered = emailService.render(
+    template as EmailTemplateName,
+    context as TemplateContextMap[EmailTemplateName]
+  );
 
   const format = (req.query.format as string) || "html";
   if (format === "json") {
@@ -149,10 +158,13 @@ router.get("/:template", (req: Request, res: Response) => {
 
   if (format === "text") {
     res.setHeader("Content-Type", "text/plain; charset=utf-8");
+    res.setHeader("X-Robots-Tag", "noindex");
     return res.send(rendered.text);
   }
 
   res.setHeader("Content-Type", "text/html; charset=utf-8");
+  res.setHeader("X-Robots-Tag", "noindex");
+  res.setHeader("Content-Security-Policy", "default-src 'self'; style-src 'unsafe-inline'");
   return res.send(rendered.html);
 });
 

@@ -7,6 +7,7 @@ import { HugeiconsIcon } from '@hugeicons/react';
 import { Search01Icon, FireIcon, Clock01Icon, FileEmptyIcon } from '@hugeicons/core-free-icons';
 import { Skeleton } from '@/components/Skeleton';
 import { WalletMenu } from '@/components/WalletMenu';
+import { TestnetBadge } from '@/components/TestnetBadge';
 import { useAuth } from '@/context/AuthContext';
 import { API_URL } from '@/lib/api';
 
@@ -136,12 +137,15 @@ export default function DiscoverPage() {
         className="sticky w-full z-50 bg-background border-b-4 border-ink"
       >
         <div className="max-w-6xl mx-auto px-4 sm:px-6 lg:px-8 py-4 flex justify-between items-center gap-4">
-          <Link href="/" className="text-xl sm:text-2xl font-extrabold text-ink shrink-0 tracking-tight">
-            SupportMe
-          </Link>
+          <div className="flex items-center gap-2">
+            <Link href="/" className="text-xl sm:text-2xl font-extrabold text-ink shrink-0 tracking-tight">
+              SupportMe
+            </Link>
+            <TestnetBadge />
+          </div>
           <div className="hidden sm:flex items-center gap-6">
-            <a href="/#features" className="font-bold text-ink hover:text-primary transition">Features</a>
-            <a href="/#how-it-works" className="font-bold text-ink hover:text-primary transition">How it Works</a>
+            <Link href="/#features" className="font-bold text-ink hover:text-primary transition">Features</Link>
+            <Link href="/#how-it-works" className="font-bold text-ink hover:text-primary transition">How it Works</Link>
             <Link href="/discover" className="font-bold text-primary underline underline-offset-4">Discover</Link>
             {user && (
               <Link href="/app" className="font-bold text-ink hover:text-primary transition">

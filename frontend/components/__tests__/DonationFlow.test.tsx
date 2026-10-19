@@ -1,11 +1,12 @@
 import { describe, it, expect, vi, beforeEach } from 'vitest';
 import { render, screen, fireEvent, waitFor, act } from '@testing-library/react';
 import { Suspense } from 'react';
+import type { ImageProps } from 'next/image';
 import CreatorProfileClient from '@/app/[username]/CreatorProfileClient';
 import * as AuthContextModule from '@/context/AuthContext';
 
 vi.mock('@/lib/assets', async () => {
-  const actual = await vi.importActual<any>('@/lib/assets');
+  const actual = await vi.importActual<typeof import('@/lib/assets')>('@/lib/assets');
   return {
     ...actual,
     availableAssetCodes: () => ['XLM', 'USDC'],
@@ -13,7 +14,10 @@ vi.mock('@/lib/assets', async () => {
 });
 
 vi.mock('next/image', () => ({
-  default: (props: any) => <img {...props} />,
+  default: ({ src, alt, ...rest }: ImageProps) => (
+    // eslint-disable-next-line @next/next/no-img-element -- test stub standing in for next/image, not a real <img>
+    <img src={typeof src === 'string' ? src : undefined} alt={alt} {...rest} />
+  ),
 }));
 
 // Only the network-touching calls are stubbed; the shared constants (message
@@ -82,6 +86,10 @@ describe('Mobile Donation & Subscription Flow', () => {
       token: 'jwt-token',
       loading: false,
       loginWithWallet: vi.fn(),
+      getTwitterRedirectUrl: vi.fn(),
+      completeTwitterLogin: vi.fn(),
+      requestMagicLink: vi.fn(),
+      verifyMagicLink: vi.fn(),
       logout: vi.fn(),
     });
   });

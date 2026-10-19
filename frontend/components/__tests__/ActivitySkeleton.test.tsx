@@ -18,7 +18,7 @@ vi.mock('@/context/AuthContext', () => ({
 }));
 
 describe('ActivitySkeleton', () => {
-  it('renders the activity skeleton structure matching headline stats and users table', () => {
+  it('renders the activity skeleton structure matching the intro and headline stats', () => {
     const { container } = render(<ActivitySkeleton />);
     expect(screen.getByTestId('activity-skeleton')).toBeInTheDocument();
 
@@ -26,12 +26,12 @@ describe('ActivitySkeleton', () => {
     const statsGrid = container.querySelector('.grid.md\\:grid-cols-3');
     expect(statsGrid).toBeInTheDocument();
 
-    // Users table skeleton
-    const tableCard = container.querySelectorAll('.card-brutal');
-    expect(tableCard.length).toBeGreaterThanOrEqual(4);
+    // Aggregate-only page: three stat cards and no per-user table.
+    expect(container.querySelectorAll('.card-brutal')).toHaveLength(3);
+    expect(container.querySelector('table')).not.toBeInTheDocument();
 
     const pulsingElements = container.querySelectorAll('.motion-safe\\:animate-pulse');
-    expect(pulsingElements.length).toBeGreaterThan(15);
+    expect(pulsingElements.length).toBeGreaterThan(8);
   });
 
   it('can omit navigation when showNav is false', () => {

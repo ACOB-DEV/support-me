@@ -134,6 +134,7 @@ describe("POST /api/donations rate limiting (#180)", () => {
     creatorUsername: "alice",
     senderAddress,
     amount: 5,
+    transactionHash: "tx-rate-limit",
   });
 
   it("rejects a sender past 20 donation requests a minute with 429", async () => {

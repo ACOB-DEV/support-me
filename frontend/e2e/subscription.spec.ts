@@ -22,7 +22,7 @@ test.describe('Subscription Flows', () => {
     await recurringCheckbox.check();
 
     // 4. Verify interval selector is visible and defaults to Monthly (30)
-    const intervalSelect = page.getByRole('combobox');
+    const intervalSelect = page.getByRole('combobox').filter({ hasText: /monthly/i });
     await expect(intervalSelect).toBeVisible();
     await expect(intervalSelect).toHaveValue('30');
 
@@ -72,10 +72,14 @@ test.describe('Subscription Flows', () => {
     await expect(page.getByText('Alice Creator')).toBeVisible();
     await expect(page.getByText(/10 XLM · monthly/i)).toBeVisible();
 
-    // 3. Click Cancel button
+    // 3. Click Cancel button and confirm in dialog
     const cancelBtn = page.getByRole('button', { name: 'Cancel' });
     await expect(cancelBtn).toBeVisible();
     await cancelBtn.click();
+
+    const confirmBtn = page.getByRole('button', { name: 'Cancel donation' });
+    await expect(confirmBtn).toBeVisible();
+    await confirmBtn.click();
 
     // 4. Verify success toast
     await expect(page.getByText('Subscription cancelled')).toBeVisible({ timeout: 10000 });

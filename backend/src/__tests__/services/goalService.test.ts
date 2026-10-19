@@ -3,22 +3,126 @@ jest.mock("../../prisma", () => ({
   default: {
     goal: {
       findMany: jest.fn(),
+      findUnique: jest.fn(),
       update: jest.fn(),
+      updateMany: jest.fn(),
     },
   },
 }));
 
+import { Prisma } from "@prisma/client";
 import prisma from "../../prisma";
 import { applyDonationToGoals, computePeriodEnd, resetDueGoals } from "../../services/goalService";
 
 const mockedPrisma = prisma as unknown as {
-  goal: { findMany: jest.Mock; update: jest.Mock };
+  goal: {
+    findMany: jest.Mock;
+    findUnique: jest.Mock;
+    update: jest.Mock;
+    updateMany: jest.Mock;
+  };
 };
 
 // applyDonationToGoals takes a Prisma.TransactionClient — a plain mocked
-// object with the same shape works fine since it's only ever used for
-// `.goal.findMany`/`.goal.update` calls.
-const fakeTransactionClient = () => mockedPrisma as any;
+// object with the same shape works fine since the goal delegate is all it
+// ever touches.
+const fakeTransactionClient = () => mockedPrisma as unknown as Prisma.TransactionClient;
+
+type FakeGoal = {
+  id: number;
+  creatorId?: number;
+  currency?: string;
+  currentAmount: number;
+  targetAmount?: number;
+  recurring?: boolean;
+  status?: string;
+  recurrenceInterval?: string | null;
+  currentPeriodEnd?: Date | null;
+};
+
+// Yields to the event loop so two "concurrent" donation flows can interleave
+// between a mock's guard-evaluation and its write — the exact window in which
+// the old read-modify-write code lost updates (issue #262).
+const tick = () => new Promise<void>((resolve) => setImmediate(resolve));
+
+type GoalWhere = {
+  id?: number;
+  status?: string;
+  recurring?: boolean;
+  currentAmount?: { lt?: number };
+  currentPeriodEnd?: { lte?: Date };
+  creatorId?: number;
+  currency?: string;
+};
+
+type GoalData = {
+  currentAmount?: number | { increment?: number };
+  status?: string;
+  currentPeriodEnd?: Date;
+};
+
+function rowMatches(row: FakeGoal, where: GoalWhere): boolean {
+  if (where.id !== undefined && row.id !== where.id) return false;
+  if (where.status !== undefined && row.status !== where.status) return false;
+  if (where.recurring !== undefined && row.recurring !== where.recurring) return false;
+  if (where.currentAmount?.lt !== undefined && !(row.currentAmount < where.currentAmount.lt)) return false;
+  if (
+    where.currentPeriodEnd?.lte !== undefined &&
+    !(row.currentPeriodEnd != null && row.currentPeriodEnd <= where.currentPeriodEnd.lte)
+  )
+    return false;
+  return true;
+}
+
+function applyData(row: FakeGoal, data: GoalData): void {
+  if (typeof data.currentAmount === "number") row.currentAmount = data.currentAmount;
+  else if (data.currentAmount?.increment !== undefined) row.currentAmount += data.currentAmount.increment;
+  if (data.status !== undefined) row.status = data.status;
+  if (data.currentPeriodEnd !== undefined) row.currentPeriodEnd = data.currentPeriodEnd;
+}
+
+/**
+ * Wires the prisma mock to an in-memory goal table with database-like write
+ * semantics: increments are applied relative to the CURRENT row value, and
+ * updateMany re-checks its WHERE guard after yielding the "row lock" — just
+ * as Postgres does under READ COMMITTED, where a concurrent transaction's
+ * committed change makes a stale guard match zero rows.
+ */
+function createGoalStore(initialGoals: FakeGoal[]) {
+  const rows = new Map(initialGoals.map((goal) => [goal.id, { ...goal }]));
+
+  mockedPrisma.goal.findMany.mockImplementation(async ({ where = {} }: { where?: GoalWhere } = {}) => {
+    await tick();
+    return [...rows.values()].filter((row) => rowMatches(row, where)).map((row) => ({ ...row }));
+  });
+  mockedPrisma.goal.findUnique.mockImplementation(async ({ where }: { where: { id: number } }) => {
+    await tick();
+    const row = rows.get(where.id);
+    return row ? { ...row } : null;
+  });
+  mockedPrisma.goal.update.mockImplementation(async ({ where, data }: { where: { id: number }; data: GoalData }) => {
+    const row = rows.get(where.id);
+    if (!row) throw new Error(`No goal with id ${where.id}`);
+    await tick();
+    applyData(row, data);
+    return { ...row };
+  });
+  mockedPrisma.goal.updateMany.mockImplementation(
+    async ({ where = {}, data }: { where?: GoalWhere; data?: GoalData } = {}) => {
+      const candidates = [...rows.values()].filter((row) => rowMatches(row, where));
+      await tick();
+      let count = 0;
+      for (const row of candidates) {
+        if (!rowMatches(row, where)) continue;
+        applyData(row, data ?? {});
+        count += 1;
+      }
+      return { count };
+    }
+  );
+
+  return rows;
+}
 
 describe("applyDonationToGoals", () => {
   it("does nothing when the creator has no active goals in that currency", async () => {
@@ -27,10 +131,11 @@ describe("applyDonationToGoals", () => {
     await applyDonationToGoals(fakeTransactionClient(), 1, "XLM", 10);
 
     expect(mockedPrisma.goal.update).not.toHaveBeenCalled();
+    expect(mockedPrisma.goal.updateMany).not.toHaveBeenCalled();
   });
 
   it("applies the full donation amount to a single matching active goal", async () => {
-    mockedPrisma.goal.findMany.mockResolvedValue([
+    const rows = createGoalStore([
       { id: 1, creatorId: 1, currency: "XLM", currentAmount: 20, targetAmount: 100, recurring: false, status: "ACTIVE" },
     ]);
 
@@ -39,14 +144,18 @@ describe("applyDonationToGoals", () => {
     expect(mockedPrisma.goal.findMany).toHaveBeenCalledWith({
       where: { creatorId: 1, currency: "XLM", status: "ACTIVE" },
     });
-    expect(mockedPrisma.goal.update).toHaveBeenCalledWith({
-      where: { id: 1 },
-      data: { currentAmount: 30 },
+    // The increment is applied by the database relative to the current row
+    // value — never an absolute amount computed in JS from a possibly-stale
+    // read, which is what lost concurrent donations (issue #262).
+    expect(mockedPrisma.goal.updateMany).toHaveBeenCalledWith({
+      where: { id: 1, status: "ACTIVE", currentAmount: { lt: 100 } },
+      data: { currentAmount: { increment: 10 } },
     });
+    expect(rows.get(1)!.currentAmount).toBe(30);
   });
 
   it("applies the FULL amount to every matching active goal, not a split", async () => {
-    mockedPrisma.goal.findMany.mockResolvedValue([
+    const rows = createGoalStore([
       { id: 1, creatorId: 1, currency: "XLM", currentAmount: 0, targetAmount: 1000, recurring: false, status: "ACTIVE" },
       { id: 2, creatorId: 1, currency: "XLM", currentAmount: 0, targetAmount: 1000, recurring: false, status: "ACTIVE" },
       { id: 3, creatorId: 1, currency: "XLM", currentAmount: 0, targetAmount: 1000, recurring: false, status: "ACTIVE" },
@@ -54,63 +163,82 @@ describe("applyDonationToGoals", () => {
 
     await applyDonationToGoals(fakeTransactionClient(), 1, "XLM", 50);
 
-    expect(mockedPrisma.goal.update).toHaveBeenCalledTimes(3);
+    expect(mockedPrisma.goal.updateMany).toHaveBeenCalledTimes(3);
     for (const id of [1, 2, 3]) {
-      expect(mockedPrisma.goal.update).toHaveBeenCalledWith({
-        where: { id },
-        data: { currentAmount: 50 },
+      expect(mockedPrisma.goal.updateMany).toHaveBeenCalledWith({
+        where: { id, status: "ACTIVE", currentAmount: { lt: 1000 } },
+        data: { currentAmount: { increment: 50 } },
       });
+      expect(rows.get(id)!.currentAmount).toBe(50);
     }
   });
 
   it("marks a non-recurring goal COMPLETED once it reaches its target", async () => {
-    mockedPrisma.goal.findMany.mockResolvedValue([
+    const rows = createGoalStore([
       { id: 1, creatorId: 1, currency: "XLM", currentAmount: 95, targetAmount: 100, recurring: false, status: "ACTIVE" },
     ]);
 
-    await applyDonationToGoals(fakeTransactionClient(), 1, "XLM", 10);
+    const reached = await applyDonationToGoals(fakeTransactionClient(), 1, "XLM", 10);
 
-    expect(mockedPrisma.goal.update).toHaveBeenCalledWith({
-      where: { id: 1 },
-      data: { currentAmount: 105, status: "COMPLETED" },
+    expect(mockedPrisma.goal.updateMany).toHaveBeenCalledWith({
+      where: { id: 1, status: "ACTIVE", currentAmount: { lt: 100 } },
+      data: { currentAmount: { increment: 10 } },
     });
+    // The COMPLETED transition is conditional on the goal still being
+    // ACTIVE, so a concurrent crossing can't flip it twice.
+    expect(mockedPrisma.goal.updateMany).toHaveBeenCalledWith({
+      where: { id: 1, status: "ACTIVE" },
+      data: { status: "COMPLETED" },
+    });
+    expect(rows.get(1)!.currentAmount).toBe(105);
+    expect(rows.get(1)!.status).toBe("COMPLETED");
+    expect(reached).toEqual([expect.objectContaining({ id: 1, currentAmount: 105, status: "COMPLETED" })]);
   });
 
   it("does NOT mark a recurring goal COMPLETED when it reaches its target — it keeps accumulating until reset", async () => {
-    mockedPrisma.goal.findMany.mockResolvedValue([
+    const rows = createGoalStore([
       { id: 1, creatorId: 1, currency: "XLM", currentAmount: 95, targetAmount: 100, recurring: true, status: "ACTIVE" },
     ]);
 
-    await applyDonationToGoals(fakeTransactionClient(), 1, "XLM", 10);
+    const reached = await applyDonationToGoals(fakeTransactionClient(), 1, "XLM", 10);
 
-    expect(mockedPrisma.goal.update).toHaveBeenCalledWith({
-      where: { id: 1 },
-      data: { currentAmount: 105 },
+    expect(mockedPrisma.goal.updateMany).not.toHaveBeenCalledWith({
+      where: { id: 1, status: "ACTIVE" },
+      data: { status: "COMPLETED" },
     });
+    expect(rows.get(1)!.currentAmount).toBe(105);
+    expect(rows.get(1)!.status).toBe("ACTIVE");
+    expect(reached).toEqual([expect.objectContaining({ id: 1, currentAmount: 105, status: "ACTIVE" })]);
   });
 
   it("returns only the goals this donation carried to their target", async () => {
-    mockedPrisma.goal.findMany.mockResolvedValue([
+    const rows = createGoalStore([
       { id: 1, creatorId: 1, currency: "XLM", currentAmount: 95, targetAmount: 100, recurring: false, status: "ACTIVE" },
       { id: 2, creatorId: 1, currency: "XLM", currentAmount: 0, targetAmount: 100, recurring: false, status: "ACTIVE" },
     ]);
-    mockedPrisma.goal.update.mockImplementation(async ({ where, data }) => ({ id: where.id, ...data }));
 
     const reached = await applyDonationToGoals(fakeTransactionClient(), 1, "XLM", 10);
 
-    expect(reached).toEqual([{ id: 1, currentAmount: 105, status: "COMPLETED" }]);
+    expect(reached).toHaveLength(1);
+    expect(reached[0]).toMatchObject({ id: 1, currentAmount: 105, status: "COMPLETED" });
+    expect(rows.get(2)!.currentAmount).toBe(10);
+    expect(rows.get(2)!.status).toBe("ACTIVE");
   });
 
   it("reports a recurring goal as reached only on the donation that crosses its target", async () => {
-    mockedPrisma.goal.findMany.mockResolvedValue([
+    const rows = createGoalStore([
       { id: 1, creatorId: 1, currency: "XLM", currentAmount: 95, targetAmount: 100, recurring: true, status: "ACTIVE" },
       { id: 2, creatorId: 1, currency: "XLM", currentAmount: 120, targetAmount: 100, recurring: true, status: "ACTIVE" },
     ]);
-    mockedPrisma.goal.update.mockImplementation(async ({ where, data }) => ({ id: where.id, ...data }));
 
     const reached = await applyDonationToGoals(fakeTransactionClient(), 1, "XLM", 10);
 
-    expect(reached).toEqual([{ id: 1, currentAmount: 105 }]);
+    // Goal 1 crossed the target; goal 2 was already past it, so the
+    // below-target claim matches nothing and it just keeps accumulating
+    // without being reported as reached.
+    expect(reached).toHaveLength(1);
+    expect(reached[0]).toMatchObject({ id: 1, currentAmount: 105 });
+    expect(rows.get(2)!.currentAmount).toBe(130);
   });
 
   it("only touches goals denominated in the donated currency", async () => {
@@ -132,7 +260,7 @@ describe("applyDonationToGoals", () => {
   // amounts are tracked per-asset and matched by exact currency string (see
   // the multi-asset design-decision comment at the top of this file).
   it("applies a USDT donation the same way as any other asset — no special-casing needed", async () => {
-    mockedPrisma.goal.findMany.mockResolvedValue([
+    const rows = createGoalStore([
       { id: 1, creatorId: 1, currency: "USDT", currentAmount: 40, targetAmount: 200, recurring: false, status: "ACTIVE" },
     ]);
 
@@ -141,10 +269,59 @@ describe("applyDonationToGoals", () => {
     expect(mockedPrisma.goal.findMany).toHaveBeenCalledWith({
       where: { creatorId: 1, currency: "USDT", status: "ACTIVE" },
     });
-    expect(mockedPrisma.goal.update).toHaveBeenCalledWith({
-      where: { id: 1 },
-      data: { currentAmount: 55 },
+    expect(mockedPrisma.goal.updateMany).toHaveBeenCalledWith({
+      where: { id: 1, status: "ACTIVE", currentAmount: { lt: 200 } },
+      data: { currentAmount: { increment: 15 } },
     });
+    expect(rows.get(1)!.currentAmount).toBe(55);
+  });
+});
+
+describe("concurrent donations (issue #262)", () => {
+  it("never loses an increment when two donations land at once", async () => {
+    const rows = createGoalStore([
+      { id: 1, creatorId: 1, currency: "XLM", currentAmount: 95, targetAmount: 1000, recurring: false, status: "ACTIVE" },
+    ]);
+
+    await Promise.all([
+      applyDonationToGoals(fakeTransactionClient(), 1, "XLM", 10),
+      applyDonationToGoals(fakeTransactionClient(), 1, "XLM", 10),
+    ]);
+
+    // 95 + 10 + 10. With the old absolute-value writes both donations
+    // started from the same stale 95 and the second clobbered the first,
+    // leaving 105 instead of 115.
+    expect(rows.get(1)!.currentAmount).toBe(115);
+  });
+
+  it("reports a non-recurring goal reached exactly once when concurrent donations cross the target together", async () => {
+    const rows = createGoalStore([
+      { id: 1, creatorId: 1, currency: "XLM", currentAmount: 95, targetAmount: 100, recurring: false, status: "ACTIVE" },
+    ]);
+
+    const [first, second] = await Promise.all([
+      applyDonationToGoals(fakeTransactionClient(), 1, "XLM", 10),
+      applyDonationToGoals(fakeTransactionClient(), 1, "XLM", 10),
+    ]);
+
+    expect(rows.get(1)!.currentAmount).toBe(115);
+    expect(rows.get(1)!.status).toBe("COMPLETED");
+    expect(first.length + second.length).toBe(1);
+  });
+
+  it("reports a recurring goal's crossing exactly once under concurrency", async () => {
+    const rows = createGoalStore([
+      { id: 1, creatorId: 1, currency: "XLM", currentAmount: 95, targetAmount: 100, recurring: true, status: "ACTIVE" },
+    ]);
+
+    const [first, second] = await Promise.all([
+      applyDonationToGoals(fakeTransactionClient(), 1, "XLM", 10),
+      applyDonationToGoals(fakeTransactionClient(), 1, "XLM", 10),
+    ]);
+
+    expect(rows.get(1)!.currentAmount).toBe(115);
+    expect(rows.get(1)!.status).toBe("ACTIVE");
+    expect(first.length + second.length).toBe(1);
   });
 });
 
@@ -165,6 +342,106 @@ describe("computePeriodEnd", () => {
 describe("resetDueGoals", () => {
   it("resets currentAmount to 0, reactivates, and rolls currentPeriodEnd forward for every due recurring goal", async () => {
     const now = new Date("2026-02-01T00:00:00.000Z");
+    const rows = createGoalStore([
+      {
+        id: 1,
+        creatorId: 1,
+        currency: "XLM",
+        currentAmount: 500,
+        targetAmount: 1000,
+        recurring: true,
+        recurrenceInterval: "MONTHLY",
+        status: "COMPLETED",
+        currentPeriodEnd: new Date("2026-01-31T00:00:00.000Z"),
+      },
+    ]);
+
+    const count = await resetDueGoals(now);
+
+    expect(mockedPrisma.goal.findMany).toHaveBeenCalledWith({
+      where: { recurring: true, currentPeriodEnd: { lte: now } },
+    });
+    // The reset is re-guarded on the same due-condition the findMany used,
+    // so a racing scheduler tick that already rolled the period forward
+    // matches zero rows and can't reset the goal a second time (issue #262).
+    expect(mockedPrisma.goal.updateMany).toHaveBeenCalledWith({
+      where: { id: 1, recurring: true, currentPeriodEnd: { lte: now } },
+      data: {
+        currentAmount: 0,
+        status: "ACTIVE",
+        currentPeriodEnd: computePeriodEnd("MONTHLY", now),
+      },
+    });
+    expect(count).toBe(1);
+    expect(rows.get(1)!.currentAmount).toBe(0);
+    expect(rows.get(1)!.status).toBe("ACTIVE");
+  });
+
+  it("does not touch goals whose period has not yet ended", async () => {
+    mockedPrisma.goal.findMany.mockResolvedValue([]);
+
+    const count = await resetDueGoals(new Date("2026-02-01T00:00:00.000Z"));
+
+    expect(mockedPrisma.goal.updateMany).not.toHaveBeenCalled();
+    expect(mockedPrisma.goal.update).not.toHaveBeenCalled();
+    expect(count).toBe(0);
+  });
+
+  it("resets multiple due goals independently, using each one's own interval", async () => {
+    const now = new Date("2026-02-01T00:00:00.000Z");
+    const rows = createGoalStore([
+      {
+        id: 1,
+        creatorId: 1,
+        currency: "XLM",
+        currentAmount: 10,
+        targetAmount: 100,
+        recurring: true,
+        recurrenceInterval: "MONTHLY",
+        status: "ACTIVE",
+        currentPeriodEnd: now,
+      },
+      {
+        id: 2,
+        creatorId: 1,
+        currency: "XLM",
+        currentAmount: 20,
+        targetAmount: 100,
+        recurring: true,
+        recurrenceInterval: "WEEKLY",
+        status: "ACTIVE",
+        currentPeriodEnd: now,
+      },
+    ]);
+
+    const count = await resetDueGoals(now);
+
+    expect(count).toBe(2);
+    expect(rows.get(1)!.currentPeriodEnd).toEqual(computePeriodEnd("MONTHLY", now));
+    expect(rows.get(2)!.currentPeriodEnd).toEqual(computePeriodEnd("WEEKLY", now));
+    expect(rows.get(1)!.currentAmount).toBe(0);
+    expect(rows.get(2)!.currentAmount).toBe(0);
+  });
+
+  it("does not re-reset a goal whose period a racing tick already rolled forward", async () => {
+    const now = new Date("2026-02-01T00:00:00.000Z");
+    const alreadyResetPeriodEnd = computePeriodEnd("MONTHLY", now);
+    const rows = createGoalStore([
+      {
+        id: 1,
+        creatorId: 1,
+        currency: "XLM",
+        currentAmount: 42,
+        targetAmount: 100,
+        recurring: true,
+        recurrenceInterval: "MONTHLY",
+        status: "ACTIVE",
+        currentPeriodEnd: alreadyResetPeriodEnd,
+      },
+    ]);
+    // Simulate the findMany snapshot having been taken before the racing
+    // tick's reset committed — the goal looks due in the stale list, but
+    // the guarded updateMany re-checks the row and finds it is not due.
     mockedPrisma.goal.findMany.mockResolvedValue([
       {
         id: 1,
@@ -178,46 +455,9 @@ describe("resetDueGoals", () => {
 
     const count = await resetDueGoals(now);
 
-    expect(mockedPrisma.goal.findMany).toHaveBeenCalledWith({
-      where: { recurring: true, currentPeriodEnd: { lte: now } },
-    });
-    expect(mockedPrisma.goal.update).toHaveBeenCalledWith({
-      where: { id: 1 },
-      data: {
-        currentAmount: 0,
-        status: "ACTIVE",
-        currentPeriodEnd: computePeriodEnd("MONTHLY", now),
-      },
-    });
-    expect(count).toBe(1);
-  });
-
-  it("does not touch goals whose period has not yet ended", async () => {
-    mockedPrisma.goal.findMany.mockResolvedValue([]);
-
-    const count = await resetDueGoals(new Date("2026-02-01T00:00:00.000Z"));
-
-    expect(mockedPrisma.goal.update).not.toHaveBeenCalled();
     expect(count).toBe(0);
-  });
-
-  it("resets multiple due goals independently, using each one's own interval", async () => {
-    const now = new Date("2026-02-01T00:00:00.000Z");
-    mockedPrisma.goal.findMany.mockResolvedValue([
-      { id: 1, recurring: true, recurrenceInterval: "MONTHLY", currentAmount: 10, status: "ACTIVE", currentPeriodEnd: now },
-      { id: 2, recurring: true, recurrenceInterval: "WEEKLY", currentAmount: 20, status: "ACTIVE", currentPeriodEnd: now },
-    ]);
-
-    const count = await resetDueGoals(now);
-
-    expect(count).toBe(2);
-    expect(mockedPrisma.goal.update).toHaveBeenCalledWith({
-      where: { id: 1 },
-      data: { currentAmount: 0, status: "ACTIVE", currentPeriodEnd: computePeriodEnd("MONTHLY", now) },
-    });
-    expect(mockedPrisma.goal.update).toHaveBeenCalledWith({
-      where: { id: 2 },
-      data: { currentAmount: 0, status: "ACTIVE", currentPeriodEnd: computePeriodEnd("WEEKLY", now) },
-    });
+    expect(mockedPrisma.goal.updateMany).toHaveBeenCalledTimes(1);
+    expect(rows.get(1)!.currentAmount).toBe(42);
+    expect(rows.get(1)!.currentPeriodEnd).toEqual(alreadyResetPeriodEnd);
   });
 });

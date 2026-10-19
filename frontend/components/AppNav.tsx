@@ -16,6 +16,7 @@ import {
 } from '@hugeicons/core-free-icons';
 import { WalletMenu } from '@/components/WalletMenu';
 import { ThemeToggle } from '@/components/ThemeToggle';
+import { TestnetBadge } from '@/components/TestnetBadge';
 
 /**
  * The three destinations that stay in the desktop top nav. Everything else
@@ -73,9 +74,12 @@ export function AppNav() {
             >
               <HugeiconsIcon icon={mobileMenuOpen ? Cancel01Icon : Menu01Icon} size={22} strokeWidth={2} />
             </button>
-            <Link href="/app" className="text-xl sm:text-2xl font-extrabold font-display text-ink shrink-0 tracking-tight">
-              SupportMe
-            </Link>
+            <div className="flex items-center gap-2">
+              <Link href="/app" className="text-xl sm:text-2xl font-extrabold font-display text-ink shrink-0 tracking-tight">
+                SupportMe
+              </Link>
+              <TestnetBadge />
+            </div>
           </div>
 
           <div data-testid="primary-nav" className="hidden sm:flex items-center gap-6">
