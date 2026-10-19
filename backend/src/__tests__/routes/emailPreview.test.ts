@@ -2,6 +2,37 @@ import request from "supertest";
 import app from "../../app";
 
 describe("Email Preview Router", () => {
+  describe("production gate", () => {
+    const originalEnv = process.env.NODE_ENV;
+
+    afterAll(() => {
+      process.env.NODE_ENV = originalEnv;
+    });
+
+    it("returns 404 in production when EMAIL_PREVIEW_ENABLED is not set", async () => {
+      process.env.NODE_ENV = "production";
+      delete process.env.EMAIL_PREVIEW_ENABLED;
+
+      const res = await request(app).get("/api/email/preview");
+      expect(res.status).toBe(404);
+    });
+
+    it("returns 200 in production when EMAIL_PREVIEW_ENABLED is true", async () => {
+      process.env.NODE_ENV = "production";
+      process.env.EMAIL_PREVIEW_ENABLED = "true";
+
+      const res = await request(app).get("/api/email/preview");
+      expect(res.status).toBe(200);
+    });
+
+    it("returns 200 in development by default", async () => {
+      process.env.NODE_ENV = "development";
+      delete process.env.EMAIL_PREVIEW_ENABLED;
+
+      const res = await request(app).get("/api/email/preview");
+      expect(res.status).toBe(200);
+    });
+  });
   it("GET /api/email/preview returns 200 HTML with list of templates", async () => {
     const res = await request(app).get("/api/email/preview");
     expect(res.status).toBe(200);
