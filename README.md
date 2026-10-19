@@ -399,8 +399,8 @@ the email provider — are in [`docs/authentication.md`](docs/authentication.md)
 
 - `GET /api/donations` - List donations (query: `creatorUsername`, `page`, and `limit`; default limit 20, maximum 100)
 - `POST /api/donations` - Record a donation (requires an `Idempotency-Key` header; keys are retained for 24 hours)
-  - Body: `{ creatorUsername, senderAddress, amount, message, transactionHash }` (the listener derives operation/event indices from RPC)
-  - When an on-chain transaction hash is supplied, the record is upserted by the durable on-chain identity rather than inserted again on replay. Browser-reported rows are provisional until the listener verifies the event.
+  - Body: `{ creatorUsername, senderAddress, amount, message, transactionHash }` (the listener derives operation/event indices from RPC). `transactionHash` is required — a hash-less report is rejected with `400` rather than stored as a verifiable donation.
+  - The record is upserted by the durable on-chain identity rather than inserted again on replay. Client-reported rows are always stored `verified: false` (only the listener / subscription executor sets `verified: true`), so they stay out of the verified-only feed until verified.
 
 ### Subscriptions (recurring donations)
 
