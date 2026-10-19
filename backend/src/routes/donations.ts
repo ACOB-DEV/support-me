@@ -209,24 +209,34 @@ router.post(
     // through. Each notification is independent (allSettled, not
     // Promise.all) so the creator's email failing doesn't skip the
     // supporter's, and each failure is logged individually.
+    // Run notifications in the background so response time doesn't depend on email provider (#275)
     if (isNewDonation) {
-      const [creatorResult, supporterResult] = await Promise.allSettled([
-        notifyDonationReceived(donation),
-        notifyDonationConfirmation(donation),
-      ]);
-      if (creatorResult.status === "rejected") {
-        console.error(
-          `Donation-received email failed for donation ${donation.id}:`,
-          (creatorResult.reason as Error).message
-        );
-      }
-      if (supporterResult.status === "rejected") {
-        console.error(
-          `Donation-confirmation email failed for donation ${donation.id}:`,
-          (supporterResult.reason as Error).message
-        );
-      }
-      await notifyGoalsReached(reachedGoals);
+      setImmediate(async () => {
+        const [creatorResult, supporterResult] = await Promise.allSettled([
+          notifyDonationReceived(donation),
+          notifyDonationConfirmation(donation),
+        ]);
+        if (creatorResult.status === "rejected") {
+          console.error(
+            `Donation-received email failed for donation ${donation.id}:`,
+            (creatorResult.reason as Error).message
+          );
+        }
+        if (supporterResult.status === "rejected") {
+          console.error(
+            `Donation-confirmation email failed for donation ${donation.id}:`,
+            (supporterResult.reason as Error).message
+          );
+        }
+        try {
+          await notifyGoalsReached(reachedGoals);
+        } catch (error) {
+          console.error(
+            `Goals-reached notification failed for donation ${donation.id}:`,
+            (error as Error).message
+          );
+        }
+      });
     }
 
     return res.status(201).json(donation);
