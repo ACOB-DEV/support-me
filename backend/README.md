@@ -133,3 +133,20 @@ The schema is versioned with Prisma Migrate. Every change to
 migration. Use it only for a throwaway prototype database. A database that was
 set up with `db push` has no migration history, so `migrate deploy` cannot
 manage it later.
+
+The `backend` CI job replays `prisma/migrations/` into a shadow Postgres
+service and diffs the result against `schema.prisma`, failing when the two
+disagree:
+
+```bash
+npx prisma migrate diff \
+  --from-migrations prisma/migrations \
+  --to-schema-datamodel prisma/schema.prisma \
+  --shadow-database-url "$SHADOW_DATABASE_URL" \
+  --exit-code
+```
+
+Exit code 0 with `No difference detected.` is the passing case; exit code 2
+means a schema change is missing its migration. Run it locally before pushing
+if you touched `schema.prisma` (the shadow URL must point at an empty
+database, which the CLI does not create for you).
