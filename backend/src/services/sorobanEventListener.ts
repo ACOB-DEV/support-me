@@ -1,6 +1,7 @@
 import { xdr, scValToNative } from "@stellar/stellar-sdk";
 import prisma from "../prisma";
 import { networkReset } from "./networkReset";
+import * as Sentry from "@sentry/node";
 import {
   DONATION_EVENT,
   SUBSCRIPTION_CREATED_EVENT,
@@ -301,6 +302,9 @@ export class SorobanEventListener {
       }
     } catch (error) {
       console.error("SorobanEventListener: poll failed:", (error as Error).message);
+      Sentry.captureException(error, {
+        tags: { component: "SorobanEventListener" },
+      });
     } finally {
       this.polling = false;
     }

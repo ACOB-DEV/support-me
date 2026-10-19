@@ -3,6 +3,7 @@ import { Prisma } from "@prisma/client";
 import { ZodError } from "zod";
 import { AppError } from "../errors/AppError";
 import { log } from "../lib/logger";
+import * as Sentry from "@sentry/node";
 
 interface BodyParserError {
   type: string;
@@ -95,5 +96,15 @@ export function errorHandler(
     path: req.path,
     error: safeErrorMessage(err),
   });
+
+  // Report unexpected 500 errors to Sentry (#273)
+  Sentry.captureException(err, {
+    tags: {
+      requestId: req.requestId || "unknown",
+      method: req.method,
+      path: req.path,
+    },
+  });
+
   return res.status(500).json(withRequestId(req, { error: "Internal server error", code: "INTERNAL_ERROR" }));
 }
