@@ -13,5 +13,9 @@ export const createDonationSchema = z.object({
   amount: z.coerce.number().positive("amount must be a positive number"),
   currency: assetCode.default("XLM"),
   message: z.string().max(500).optional(),
-  transactionHash: txHash.optional(),
+  // Required: a donation report must reference the on-chain transaction that
+  // paid it, otherwise the row can never be corroborated by the event
+  // listener. See issue #258 — hash-less reports used to be stored as
+  // verified: true, which let anyone fabricate donations.
+  transactionHash: txHash,
 });

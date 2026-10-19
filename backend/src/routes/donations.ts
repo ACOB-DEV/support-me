@@ -92,10 +92,13 @@ router.post(
     // row using its RPC-provided event identity.
     const operationIndex = 0;
     const eventIndex = 0;
-    const onChainEventId = transactionHash
-      ? `${transactionHash}:${operationIndex}:${eventIndex}`
-      : undefined;
-    const verified = !transactionHash;
+    const onChainEventId = `${transactionHash}:${operationIndex}:${eventIndex}`;
+    // Client reports are never trusted as verified (issue #258): only the
+    // server-side verification paths (the event listener / subscription
+    // executor) may set verified: true. A reported donation is stored
+    // provisional and excluded from verified-only aggregates until it is
+    // corroborated on-chain.
+    const verified = false;
 
     // Tracks whether this request is the one that actually inserted the
     // donation row, as opposed to an idempotent replay returning the
@@ -126,40 +129,28 @@ router.post(
       const creator = await client.creator.findUnique({ where: { username: creatorUsername } });
       if (!creator) throw new NotFoundError("Creator not found");
 
-      const donation = onChainEventId
-        ? await client.donation.upsert({
-            where: {
-              transactionHash_operationIndex_eventIndex: {
-                transactionHash,
-                operationIndex,
-                eventIndex,
-              },
-            },
-            update: {},
-            create: {
-              creatorId: creator.id,
-              senderAddress,
-              amount,
-              currency,
-              message,
-              transactionHash,
-              onChainEventId,
-              operationIndex,
-              eventIndex,
-              verified: false,
-            },
-          })
-        : await client.donation.create({
-            data: {
-              creatorId: creator.id,
-              senderAddress,
-              amount,
-              currency,
-              message,
-              transactionHash,
-              verified,
-            },
-          });
+      const donation = await client.donation.upsert({
+        where: {
+          transactionHash_operationIndex_eventIndex: {
+            transactionHash,
+            operationIndex,
+            eventIndex,
+          },
+        },
+        update: {},
+        create: {
+          creatorId: creator.id,
+          senderAddress,
+          amount,
+          currency,
+          message,
+          transactionHash,
+          onChainEventId,
+          operationIndex,
+          eventIndex,
+          verified,
+        },
+      });
       await client.donationIdempotencyKey.create({
         data: { key: idempotencyKey, donationId: donation.id, expiresAt },
       });
@@ -183,7 +174,7 @@ router.post(
           include: { donation: true },
         });
         if (existing && existing.expiresAt > new Date()) donation = existing.donation;
-        else if (onChainEventId) {
+        else {
           // The event listener may have won the unique on-chain identity race
           // while this request was being processed. Its row is the canonical
           // result, so return it rather than surfacing a spurious 500.
@@ -198,7 +189,7 @@ router.post(
           });
           if (!onChainDonation) throw error;
           donation = onChainDonation;
-        } else throw error;
+        }
       } else {
         throw error;
       }

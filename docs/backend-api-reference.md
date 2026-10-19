@@ -541,6 +541,11 @@ Record a donation (requires `Idempotency-Key` header).
 }
 ```
 
+`creatorUsername`, `senderAddress`, `amount` and `transactionHash` are
+required; omitting `transactionHash` returns `400 VALIDATION_ERROR`. A report
+without a transaction hash cannot be corroborated on-chain, so the API rejects
+it rather than recording an unverifiable donation (issue #258).
+
 **Response:**
 ```json
 {
@@ -561,8 +566,11 @@ Record a donation (requires `Idempotency-Key` header).
 
 **Notes:**
 - Idempotent on `Idempotency-Key` header
-- When `transactionHash` is provided, uses upsert based on on-chain identity
-- Browser-reported rows are provisional until verified by the event listener
+- `transactionHash` is required; the report is upserted on its on-chain identity
+- Client-reported rows are always stored `verified: false` — only server-side
+  verification (the event listener / subscription executor) can set
+  `verified: true`, and unverified rows are excluded from the verified-only
+  feed (`GET /api/donations`)
 - Triggers email notifications to both creator and supporter
 
 ---

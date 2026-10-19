@@ -128,6 +128,7 @@ describe("POST /api/donations", () => {
       senderAddress:
         "GA7D5LDGFABXNYEO6LZVMTWK5JWEPTODCLYZ7TG4XDZRKKXP6OS5K5JW",
       amount: 10,
+      transactionHash: "tx-no-key",
     });
 
     expect(res.status).toBe(400);
@@ -149,13 +150,32 @@ describe("POST /api/donations", () => {
       senderAddress:
         "GA7D5LDGFABXNYEO6LZVMTWK5JWEPTODCLYZ7TG4XDZRKKXP6OS5K5JW",
       amount: 10,
+      transactionHash: "tx-missing-creator",
     });
 
     expect(res.status).toBe(404);
     expect(res.body.code).toBe("NOT_FOUND");
   });
 
-  it("creates a donation for an existing creator", async () => {
+  // Issue #258: a report with no transactionHash can never be corroborated
+  // on-chain, so it must be rejected outright rather than stored as a
+  // (fake) verified donation.
+  it("rejects a donation report without a transactionHash", async () => {
+    const res = await request(app).post("/api/donations").set("Idempotency-Key", "no-hash").send({
+      creatorUsername: "bob",
+      senderAddress:
+        "GA7D5LDGFABXNYEO6LZVMTWK5JWEPTODCLYZ7TG4XDZRKKXP6OS5K5JW",
+      amount: 10,
+      message: "nice work",
+    });
+
+    expect(res.status).toBe(400);
+    expect(res.body.code).toBe("VALIDATION_ERROR");
+    expect(mockedPrisma.donation.create).not.toHaveBeenCalled();
+    expect(mockedPrisma.donation.upsert).not.toHaveBeenCalled();
+  });
+
+  it("stores a client-reported donation as verified: false", async () => {
     mockedPrisma.creator.findUnique.mockResolvedValue({ id: 7, username: "bob" });
     const created = {
       id: 1,
@@ -164,8 +184,9 @@ describe("POST /api/donations", () => {
         "GA7D5LDGFABXNYEO6LZVMTWK5JWEPTODCLYZ7TG4XDZRKKXP6OS5K5JW",
       amount: 10,
       currency: "XLM",
+      transactionHash: "tx-1",
     };
-    mockedPrisma.donation.create.mockResolvedValue(created);
+    mockedPrisma.donation.upsert.mockResolvedValue(created);
 
     const res = await request(app).post("/api/donations").set("Idempotency-Key", "donation-1").send({
       creatorUsername: "bob",
@@ -173,22 +194,26 @@ describe("POST /api/donations", () => {
         "GA7D5LDGFABXNYEO6LZVMTWK5JWEPTODCLYZ7TG4XDZRKKXP6OS5K5JW",
       amount: 10,
       message: "nice work",
+      transactionHash: "tx-1",
     });
 
     expect(res.status).toBe(201);
     expect(res.body).toEqual(created);
-    expect(mockedPrisma.donation.create).toHaveBeenCalledWith({
-      data: {
-        creatorId: 7,
-        senderAddress:
-          "GA7D5LDGFABXNYEO6LZVMTWK5JWEPTODCLYZ7TG4XDZRKKXP6OS5K5JW",
-        amount: 10,
-        currency: "XLM",
-        message: "nice work",
-        transactionHash: undefined,
-        verified: true,
-      },
-    });
+    // Only server-side verification (the event listener / subscription
+    // executor) may mark a row verified — never the client report itself.
+    expect(mockedPrisma.donation.upsert).toHaveBeenCalledWith(
+      expect.objectContaining({
+        create: expect.objectContaining({ transactionHash: "tx-1", verified: false }),
+      })
+    );
+
+    // ...and the public feed only ever serves verified rows, so a provisional
+    // report does not appear there until it is verified.
+    mockedPrisma.donation.findMany.mockResolvedValue([]);
+    await request(app).get("/api/donations");
+    expect(mockedPrisma.donation.findMany).toHaveBeenCalledWith(
+      expect.objectContaining({ where: { verified: true } })
+    );
   });
 
   it("upserts a reported on-chain event by transaction and event index", async () => {
@@ -244,6 +269,7 @@ describe("POST /api/donations", () => {
         senderAddress:
           "GA7D5LDGFABXNYEO6LZVMTWK5JWEPTODCLYZ7TG4XDZRKKXP6OS5K5JW",
         amount: 99,
+        transactionHash: "tx-replay",
       });
 
     expect(res.status).toBe(201);
@@ -256,7 +282,7 @@ describe("POST /api/donations", () => {
 
   it("applies a new donation's amount to every matching active goal (issue #20)", async () => {
     mockedPrisma.creator.findUnique.mockResolvedValue({ id: 7, username: "bob" });
-    mockedPrisma.donation.create.mockResolvedValue({
+    mockedPrisma.donation.upsert.mockResolvedValue({
       id: 1,
       creatorId: 7,
       amount: 10,
@@ -274,6 +300,7 @@ describe("POST /api/donations", () => {
       senderAddress: "GA7D5LDGFABXNYEO6LZVMTWK5JWEPTODCLYZ7TG4XDZRKKXP6OS5K5JW",
       amount: 10,
       currency: "XLM",
+      transactionHash: "tx-goal-1",
     });
 
     expect(res.status).toBe(201);
@@ -297,7 +324,7 @@ describe("POST /api/donations", () => {
   it("emails the creator when a donation carries a goal to its target", async () => {
     const creator = { id: 7, username: "bob", user: { email: "bob@example.com" } };
     mockedPrisma.creator.findUnique.mockResolvedValue(creator);
-    mockedPrisma.donation.create.mockResolvedValue({ id: 1, creatorId: 7, amount: 10, currency: "XLM" });
+    mockedPrisma.donation.upsert.mockResolvedValue({ id: 1, creatorId: 7, amount: 10, currency: "XLM" });
     const goal = { id: 2, creatorId: 7, title: "New mic", currency: "XLM", currentAmount: 95, targetAmount: 100, recurring: false, status: "ACTIVE" };
     mockedPrisma.goal.findMany.mockResolvedValue([goal]);
     mockedPrisma.goal.update.mockResolvedValue({ ...goal, currentAmount: 105, status: "COMPLETED" });
@@ -307,6 +334,7 @@ describe("POST /api/donations", () => {
       senderAddress: "GA7D5LDGFABXNYEO6LZVMTWK5JWEPTODCLYZ7TG4XDZRKKXP6OS5K5JW",
       amount: 10,
       currency: "XLM",
+      transactionHash: "tx-goal-reached",
     });
 
     expect(res.status).toBe(201);
@@ -320,7 +348,7 @@ describe("POST /api/donations", () => {
   // need special-casing for a new one to work end-to-end.
   it("records a donation in USDT and applies it to matching USDT goals (issue #18)", async () => {
     mockedPrisma.creator.findUnique.mockResolvedValue({ id: 7, username: "bob" });
-    mockedPrisma.donation.create.mockResolvedValue({
+    mockedPrisma.donation.upsert.mockResolvedValue({
       id: 1,
       creatorId: 7,
       amount: 25,
@@ -343,12 +371,21 @@ describe("POST /api/donations", () => {
       senderAddress: "GA7D5LDGFABXNYEO6LZVMTWK5JWEPTODCLYZ7TG4XDZRKKXP6OS5K5JW",
       amount: 25,
       currency: "USDT",
+      transactionHash: "tx-usdt-1",
     });
 
     expect(res.status).toBe(201);
     expect(res.body.currency).toBe("USDT");
-    expect(mockedPrisma.donation.create).toHaveBeenCalledWith({
-      data: expect.objectContaining({ currency: "USDT", amount: 25 }),
+    expect(mockedPrisma.donation.upsert).toHaveBeenCalledWith({
+      where: {
+        transactionHash_operationIndex_eventIndex: {
+          transactionHash: "tx-usdt-1",
+          operationIndex: 0,
+          eventIndex: 0,
+        },
+      },
+      update: {},
+      create: expect.objectContaining({ currency: "USDT", amount: 25 }),
     });
     expect(mockedPrisma.goal.findMany).toHaveBeenCalledWith({
       where: { creatorId: 7, currency: "USDT", status: "ACTIVE" },
@@ -361,7 +398,7 @@ describe("POST /api/donations", () => {
 
   it("does not apply a USDT donation to an XLM-denominated goal", async () => {
     mockedPrisma.creator.findUnique.mockResolvedValue({ id: 7, username: "bob" });
-    mockedPrisma.donation.create.mockResolvedValue({ id: 1, creatorId: 7, amount: 25, currency: "USDT" });
+    mockedPrisma.donation.upsert.mockResolvedValue({ id: 1, creatorId: 7, amount: 25, currency: "USDT" });
     // findMany is already scoped by currency in the query, so an XLM goal
     // would never be returned for a USDT donation — asserting the empty
     // result here confirms update is correctly skipped.
@@ -372,6 +409,7 @@ describe("POST /api/donations", () => {
       senderAddress: "GA7D5LDGFABXNYEO6LZVMTWK5JWEPTODCLYZ7TG4XDZRKKXP6OS5K5JW",
       amount: 25,
       currency: "USDT",
+      transactionHash: "tx-usdt-2",
     });
 
     expect(mockedPrisma.goal.update).not.toHaveBeenCalled();
@@ -386,7 +424,7 @@ describe("POST /api/donations", () => {
       amount: 10,
       currency: "XLM",
       message: "nice work",
-      transactionHash: null,
+      transactionHash: "tx-notify",
       // The receipt template formats this date; without it rendering throws
       // and the (deliberately non-fatal) notification is skipped.
       createdAt: new Date("2026-08-01T00:00:00.000Z"),
@@ -410,13 +448,14 @@ describe("POST /api/donations", () => {
 
     it("emails the creator when they have an email on file", async () => {
       mockCreatorLookups(true);
-      mockedPrisma.donation.create.mockResolvedValue(created);
+      mockedPrisma.donation.upsert.mockResolvedValue(created);
 
       const res = await request(app).post("/api/donations").set("Idempotency-Key", "notify-1").send({
         creatorUsername: "bob",
         senderAddress: SENDER_ADDRESS,
         amount: 10,
         message: "nice work",
+        transactionHash: "tx-notify-1",
       });
 
       expect(res.status).toBe(201);
@@ -427,12 +466,13 @@ describe("POST /api/donations", () => {
 
     it("does not email the creator when they have no email on file, and does not fail the request", async () => {
       mockCreatorLookups(false);
-      mockedPrisma.donation.create.mockResolvedValue(created);
+      mockedPrisma.donation.upsert.mockResolvedValue(created);
 
       const res = await request(app).post("/api/donations").set("Idempotency-Key", "notify-2").send({
         creatorUsername: "bob",
         senderAddress: SENDER_ADDRESS,
         amount: 10,
+        transactionHash: "tx-notify-2",
       });
 
       expect(res.status).toBe(201);
@@ -441,7 +481,7 @@ describe("POST /api/donations", () => {
 
     it("emails the supporter a confirmation when their wallet address matches a known account with an email", async () => {
       mockCreatorLookups(false);
-      mockedPrisma.donation.create.mockResolvedValue(created);
+      mockedPrisma.donation.upsert.mockResolvedValue(created);
       mockedPrisma.user.findUnique.mockResolvedValue({
         id: 3,
         walletAddress: SENDER_ADDRESS,
@@ -452,6 +492,7 @@ describe("POST /api/donations", () => {
         creatorUsername: "bob",
         senderAddress: SENDER_ADDRESS,
         amount: 10,
+        transactionHash: "tx-notify-3",
       });
 
       expect(res.status).toBe(201);
@@ -472,6 +513,7 @@ describe("POST /api/donations", () => {
         creatorUsername: "bob",
         senderAddress: SENDER_ADDRESS,
         amount: 99,
+        transactionHash: "tx-notify-4",
       });
 
       expect(res.status).toBe(201);
@@ -480,13 +522,14 @@ describe("POST /api/donations", () => {
 
     it("still returns 201 with the created donation when email delivery throws", async () => {
       mockCreatorLookups(true);
-      mockedPrisma.donation.create.mockResolvedValue(created);
+      mockedPrisma.donation.upsert.mockResolvedValue(created);
       mockedSendEmail.mockRejectedValue(new Error("email provider down"));
 
       const res = await request(app).post("/api/donations").set("Idempotency-Key", "notify-5").send({
         creatorUsername: "bob",
         senderAddress: SENDER_ADDRESS,
         amount: 10,
+        transactionHash: "tx-notify-5",
       });
 
       expect(res.status).toBe(201);
