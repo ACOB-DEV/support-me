@@ -115,6 +115,8 @@ router.get("/", (req: Request, res: Response) => {
 </html>`;
 
   res.setHeader("Content-Type", "text/html; charset=utf-8");
+  res.setHeader("X-Robots-Tag", "noindex");
+  res.setHeader("Content-Security-Policy", "default-src 'self'; style-src 'unsafe-inline'");
   return res.send(indexHtml);
 });
 
@@ -156,10 +158,13 @@ router.get("/:template", (req: Request, res: Response) => {
 
   if (format === "text") {
     res.setHeader("Content-Type", "text/plain; charset=utf-8");
+    res.setHeader("X-Robots-Tag", "noindex");
     return res.send(rendered.text);
   }
 
   res.setHeader("Content-Type", "text/html; charset=utf-8");
+  res.setHeader("X-Robots-Tag", "noindex");
+  res.setHeader("Content-Security-Policy", "default-src 'self'; style-src 'unsafe-inline'");
   return res.send(rendered.html);
 });
 

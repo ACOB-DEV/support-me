@@ -6,6 +6,7 @@ import { goalResetScheduler } from "./services/goalResetScheduler";
 import { validateStellarNetworkSetup } from "./services/startupValidation";
 import { networkReset } from "./services/networkReset";
 import { log } from "./lib/logger";
+import prisma from "./prisma";
 
 async function main(): Promise<void> {
   validateConfig();
@@ -32,7 +33,7 @@ async function main(): Promise<void> {
   // signing key (#178).
   assertRequiredEnv();
 
-  app.listen(port, () => {
+  const server = app.listen(port, () => {
     console.log(`SupportMe backend listening on http://localhost:${port}`);
     goalResetScheduler.start();
 
@@ -48,6 +49,49 @@ async function main(): Promise<void> {
     sorobanEventListener.start();
     subscriptionExecutor.start();
   });
+
+  // Graceful shutdown on SIGTERM/SIGINT (#277)
+  const shutdownTimeoutMs = Number(process.env.SHUTDOWN_TIMEOUT_MS) || 25000;
+  const shutdown = async (signal: string) => {
+    log("info", `Received ${signal}, starting graceful shutdown`);
+
+    // Stop accepting new connections
+    server.close(() => {
+      log("info", "HTTP server closed, no longer accepting connections");
+    });
+
+    // Stop background workers
+    sorobanEventListener.stop();
+    goalResetScheduler.stop();
+
+    // Wait for in-progress executor tick to finish with timeout
+    const executorWaitStart = Date.now();
+    while (subscriptionExecutor.running && Date.now() - executorWaitStart < shutdownTimeoutMs) {
+      await new Promise((resolve) => setTimeout(resolve, 50));
+    }
+
+    subscriptionExecutor.stop();
+
+    // Disconnect Prisma
+    await prisma.$disconnect();
+    log("info", "Prisma disconnected");
+
+    log("info", "Graceful shutdown complete");
+    process.exit(0);
+  };
+
+  const forceExit = () => {
+    log("error", "Forcing exit after shutdown timeout");
+    process.exit(1);
+  };
+
+  const shutdownWithTimeout = (signal: string) => {
+    const timeout = setTimeout(forceExit, shutdownTimeoutMs);
+    shutdown(signal).finally(() => clearTimeout(timeout));
+  };
+
+  process.on("SIGTERM", () => shutdownWithTimeout("SIGTERM"));
+  process.on("SIGINT", () => shutdownWithTimeout("SIGINT"));
 }
 
 void main().catch((error) => {
