@@ -228,6 +228,38 @@ describe("POST /api/donations", () => {
     });
   });
 
+  it("does not apply an unverified on-chain report to goals or send notifications (#260)", async () => {
+    mockedPrisma.creator.findUnique.mockResolvedValue({ id: 7, username: "bob" });
+    // The listener has not yet verified this tx hash, so the row is
+    // provisional and must not touch goal progress or trigger any email.
+    mockedPrisma.donation.upsert.mockResolvedValue({
+      id: 2,
+      creatorId: 7,
+      amount: 500,
+      currency: "XLM",
+      transactionHash: "tx-unverified",
+      verified: false,
+    });
+
+    const res = await request(app)
+      .post("/api/donations")
+      .set("Idempotency-Key", "donation-unverified")
+      .send({
+        creatorUsername: "bob",
+        senderAddress:
+          "GA7D5LDGFABXNYEO6LZVMTWK5JWEPTODCLYZ7TG4XDZRKKXP6OS5K5JW",
+        amount: 500,
+        currency: "XLM",
+        transactionHash: "tx-unverified",
+      });
+
+    expect(res.status).toBe(201);
+    expect(res.body.verified).toBe(false);
+    expect(mockedPrisma.goal.findMany).not.toHaveBeenCalled();
+    expect(mockedPrisma.goal.update).not.toHaveBeenCalled();
+    expect(mockedSendEmail).not.toHaveBeenCalled();
+  });
+
   it("returns the original donation for a repeated idempotency key", async () => {
     const original = { id: 1, creatorId: 7, amount: 10 };
     mockedPrisma.donationIdempotencyKey.findUnique.mockResolvedValue({

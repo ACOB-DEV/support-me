@@ -1,6 +1,6 @@
 'use client';
 
-import { useState, useEffect, useRef, useLayoutEffect } from 'react';
+import { useState, useEffect, useRef, useLayoutEffect, useMemo } from 'react';
 import Link from 'next/link';
 import { notify } from '@/lib/notify';
 import { donationsCsvFilename, donationsToCsv, downloadCsv } from '@/lib/csv';
@@ -309,6 +309,34 @@ export default function DashboardPage() {
     };
   }, [creator?.walletAddress]);
 
+  // Lifetime received totals per asset (#245). The headline volume cards must
+  // reflect the creator's full verified history, so once the server-side
+  // aggregate (#224) has loaded we use it rather than summing the paginated
+  // list — which only covers the loaded page and would grow as the creator
+  // scrolls. Before it loads we fall back to the loaded rows so the section
+  // isn't blank.
+  const receivedTotals = useMemo(() => {
+    const totals = new Map<string, number>();
+    if (stats) {
+      for (const c of stats.currencies) totals.set(c.currency, c.total);
+    } else {
+      for (const d of donations) totals.set(d.currency, (totals.get(d.currency) ?? 0) + d.amount);
+    }
+    return totals;
+  }, [stats, donations]);
+
+  // One card per accepted or received currency, so USDT (or any future asset)
+  // shows up instead of being silently dropped by a hardcoded XLM/USDC pair.
+  const volumeCurrencies = useMemo(() => {
+    const accepted = [
+      creator?.acceptsXlm ? 'XLM' : null,
+      creator?.acceptsUsdc ? 'USDC' : null,
+      creator?.acceptsUsdt ? 'USDT' : null,
+    ].filter((c): c is string => Boolean(c));
+    const all = new Set<string>([...accepted, ...receivedTotals.keys()]);
+    return Array.from(all).sort((a, b) => a.localeCompare(b));
+  }, [creator, receivedTotals]);
+
   if (loading) {
     return (
       <ProtectedRoute>
@@ -332,15 +360,6 @@ export default function DashboardPage() {
       </ProtectedRoute>
     );
   }
-
-  // Split lifetime volume by asset so the two headline cards reflect what was
-  // actually received in each currency, rather than summing across them.
-  const xlmVolume = donations
-    .filter((d) => d.currency === 'XLM')
-    .reduce((sum, d) => sum + d.amount, 0);
-  const usdcVolume = donations
-    .filter((d) => d.currency === 'USDC')
-    .reduce((sum, d) => sum + d.amount, 0);
 
   // Total cashed out, by asset withdrawn. Kept separate from the received-volume
   // cards above so those stay a clean lifetime-received figure.
@@ -400,25 +419,28 @@ export default function DashboardPage() {
               {stats && <DashboardStats stats={stats} prices={prices} />}
 
               {/* Volume by asset, plus lifetime cashed out */}
-              <div className="grid md:grid-cols-3 gap-6 mb-8">
-                <div className="card-brutal bg-brand-cyan p-6">
-                  <p className="text-ink text-sm font-bold uppercase tracking-wide">XLM Volume</p>
-                  <p className="text-2xl sm:text-3xl font-extrabold text-ink mt-2 tabular-nums">
-                    {Math.round(xlmVolume).toLocaleString()} <span className="text-xl">XLM</span>
-                  </p>
-                  {formatUsd(xlmVolume, 'XLM', prices) && (
-                    <p className="text-sm font-bold text-ink/70 mt-1">{formatUsd(xlmVolume, 'XLM', prices)}</p>
-                  )}
-                </div>
-                <div className="card-brutal bg-brand-lime p-6">
-                  <p className="text-ink text-sm font-bold uppercase tracking-wide">USDC Volume</p>
-                  <p className="text-2xl sm:text-3xl font-extrabold text-ink mt-2 tabular-nums">
-                    {Math.round(usdcVolume)} <span className="text-xl">USDC</span>
-                  </p>
-                  {formatUsd(usdcVolume, 'USDC', prices) && (
-                    <p className="text-sm font-bold text-ink/70 mt-1">{formatUsd(usdcVolume, 'USDC', prices)}</p>
-                  )}
-                </div>
+              <div className="grid sm:grid-cols-2 lg:grid-cols-3 gap-6 mb-8">
+                {volumeCurrencies.map((currency) => {
+                  const total = receivedTotals.get(currency) ?? 0;
+                  return (
+                    <div
+                      key={currency}
+                      className={`card-brutal p-6 ${
+                        currency === 'XLM' ? 'bg-brand-cyan' : currency === 'USDC' ? 'bg-brand-lime' : 'bg-card'
+                      }`}
+                    >
+                      <p className="text-ink text-sm font-bold uppercase tracking-wide">
+                        {currency} Volume
+                      </p>
+                      <p className="text-2xl sm:text-3xl font-extrabold text-ink mt-2 tabular-nums">
+                        {Math.round(total).toLocaleString()} <span className="text-xl">{currency}</span>
+                      </p>
+                      {formatUsd(total, currency, prices) && (
+                        <p className="text-sm font-bold text-ink/70 mt-1">{formatUsd(total, currency, prices)}</p>
+                      )}
+                    </div>
+                  );
+                })}
                 <div className="card-brutal bg-card p-6">
                   <p className="text-ink text-sm font-bold uppercase tracking-wide">Withdrawn</p>
                   {withdrawnTotal === 0 ? (

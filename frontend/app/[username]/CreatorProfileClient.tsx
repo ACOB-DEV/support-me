@@ -22,6 +22,7 @@ import {
   fundWithFriendbot,
 } from '@/lib/contract';
 import { availableAssetCodes, getAsset, type AssetCode } from '@/lib/assets';
+import { MIN_DONATION_AMOUNT } from '@/lib/donation';
 import { getPlatform } from '@/lib/socials';
 import { API_URL } from '@/lib/api';
 import { fetchWithRetry } from '@/lib/network';
@@ -59,7 +60,9 @@ interface Creator {
 // Fallback quick-select amounts shown on the donate page when a creator
 // hasn't configured their own presets from Settings.
 const DEFAULT_DONATION_PRESETS = ['1', '5', '10', '20'];
-export const MIN_DONATION_AMOUNT = 0.1;
+// Re-exported for existing importers; defined in lib/donation.ts so Settings
+// and the donate page enforce the same minimum (#244).
+export { MIN_DONATION_AMOUNT };
 export const LARGE_DONATION_THRESHOLD = 1000;
 
 interface Goal {
@@ -471,8 +474,9 @@ function CreatorProfileView({ username, locale, onLocaleChange }: CreatorProfile
       });
 
       setBalance(await loadAssetBalance(userAddress, assetCode));
-      // The record call (if it succeeded) already applied this donation to
-      // any matching active goals server-side — pick up the new totals.
+      // A hash-bearing report is only provisional: the backend's Soroban event
+      // listener verifies the event and applies it to matching active goals
+      // asynchronously, so goal totals may lag this response by a poll.
       if (recordRes.ok) await fetchGoals();
 
       const txLink = (

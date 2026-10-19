@@ -177,5 +177,15 @@ case "goal_upd": {
 }
 ```
 
-### 3.3. Real-Time Dashboard Updates (SSE)
+### 3.3. Reconciling Donations Without Polling
+A `DonatedEvent` is the authoritative record of a one-off donation. When the listener ingests one it resolves the creator by the event's creator wallet (skipping, with a log line, events for unknown creators), converts the stroop amount to whole units, and writes or updates the matching `Donation` row setting `verified: true`.
+
+Rows may exist in two states:
+
+- A hash-bearing `POST /api/donations` report is stored provisionally with `verified: false`. Such a report never touches goal progress or sends email — otherwise an unauthenticated caller could inflate a creator's goals and use the endpoint as a spam relay.
+- The listener is the only writer allowed to flip a row to `verified: true`. It matches the row by `rpcEventId` (`evt.id`) or the `(transactionHash, operationIndex, eventIndex)` identity, backfills the authoritative `amount`/`currency`/`senderAddress`/`creatorId`, applies the donation to the creator's active same-currency goals, and sends the donation and goal-reached notifications.
+
+The verification flip is a conditional `updateMany({ where: { verified: false } })`, so a replayed lookback after a restart — or a concurrent client report — is a no-op rather than a double-count. Donations made entirely on-chain (with no client report) are created directly in the verified state.
+
+### 3.4. Real-Time Dashboard Updates (SSE)
 All processed events are published onto `eventBus` and broadcast via Server-Sent Events at `GET /api/events` to any open creator dashboards or activity monitors.
