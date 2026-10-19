@@ -84,6 +84,15 @@ jobs:
       - name: Apply migrations
         run: npx prisma migrate deploy
 
+      - name: Check migrations match schema.prisma (drift)
+        run: |
+          PGPASSWORD=postgres psql -h localhost -U postgres -c 'CREATE DATABASE prisma_shadow;'
+          npx prisma migrate diff \
+            --from-migrations prisma/migrations \
+            --to-schema-datamodel prisma/schema.prisma \
+            --shadow-database-url "postgresql://postgres:postgres@localhost:5432/prisma_shadow?schema=public" \
+            --exit-code
+
       - name: Seed demo data twice (idempotency smoke, #280)
         run: |
           npx prisma db seed
