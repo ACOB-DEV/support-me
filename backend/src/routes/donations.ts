@@ -163,11 +163,16 @@ router.post(
       await client.donationIdempotencyKey.create({
         data: { key: idempotencyKey, donationId: donation.id, expiresAt },
       });
-      // Only reached for a genuinely new donation (the early returns above,
-      // for a repeated idempotency key, skip this) — otherwise a retried
-      // request would double-count the same donation against goal progress.
-      reachedGoals = await applyDonationToGoals(client, creator.id, currency, amount);
-      isNewDonation = true;
+      // Only a client-reported row that is already verified (no transaction
+      // hash — see the `verified` computation above) may touch goal progress.
+      // A hash-bearing report is provisional (#260): the Soroban listener is
+      // the only writer allowed to verify it and, in doing so, apply it to
+      // goals and send notifications exactly once. Applying here would let an
+      // unauthenticated caller inflate goal progress and trigger emails.
+      if (verified) {
+        reachedGoals = await applyDonationToGoals(client, creator.id, currency, amount);
+        isNewDonation = true;
+      }
       return donation;
     };
 
