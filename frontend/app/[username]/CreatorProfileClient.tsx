@@ -7,7 +7,7 @@ import { NextIntlClientProvider, useTranslations } from 'next-intl';
 import { notify } from '@/lib/notify';
 import { HugeiconsIcon } from '@hugeicons/react';
 import { PartyIcon, TwitterIcon, LinkIcon } from '@hugeicons/core-free-icons';
-import { connectWallet } from '@/lib/wallet';
+import { connectWallet, addTrustline } from '@/lib/wallet';
 import {
   categorizeWalletError,
   WALLET_INSTALL_LINKS,
@@ -19,6 +19,7 @@ import {
   approveAllowance,
   subscribe,
   MAX_CHARGE_INTERVAL_DAYS,
+  fundWithFriendbot,
 } from '@/lib/contract';
 import { availableAssetCodes, getAsset, type AssetCode } from '@/lib/assets';
 import { getPlatform } from '@/lib/socials';
@@ -131,6 +132,9 @@ function CreatorProfileView({ username, locale, onLocaleChange }: CreatorProfile
   const [userAddress, setUserAddress] = useState<string | null>(null);
   const [balance, setBalance] = useState<string | null>(null);
   const [connecting, setConnecting] = useState(false);
+  const [isUnfunded, setIsUnfunded] = useState(false);
+  const [funding, setFunding] = useState(false);
+  const [missingTrustline, setMissingTrustline] = useState(false);
 
   const [donationAmount, setDonationAmount] = useState('5');
   const [donationMessage, setDonationMessage] = useState('');
@@ -298,12 +302,14 @@ function CreatorProfileView({ username, locale, onLocaleChange }: CreatorProfile
   const loadAssetBalance = useCallback(async (address: string, code: string) => {
     try {
       const account = await server.loadAccount(address);
+      setIsUnfunded(false);
       const asset = getAsset(code);
       let match;
       if (code === 'XLM') {
         match = account.balances.find(
           (b: { asset_type?: string }) => b.asset_type === 'native'
         );
+        setMissingTrustline(false);
       } else {
         match = account.balances.find((b: { asset_type?: string; asset_code?: string }) => {
           if (b.asset_type === 'native') return false;
@@ -312,9 +318,16 @@ function CreatorProfileView({ username, locale, onLocaleChange }: CreatorProfile
           }
           return b.asset_code === code;
         });
+        // For non-XLM assets, missing match means no trustline
+        setMissingTrustline(!match);
       }
       return parseFloat((match as { balance?: string })?.balance || '0').toFixed(4);
-    } catch {
+    } catch (err) {
+      // Detect 404 / not found errors which indicate an unfunded account
+      const message = (err as Error)?.message || '';
+      if (/not found|404|account does not exist/i.test(message)) {
+        setIsUnfunded(true);
+      }
       return null;
     }
   }, []);
@@ -374,6 +387,34 @@ function CreatorProfileView({ username, locale, onLocaleChange }: CreatorProfile
       }
     } finally {
       setConnecting(false);
+    }
+  };
+
+  const handleFundWithFriendbot = async () => {
+    if (!userAddress) return;
+    setFunding(true);
+    try {
+      await fundWithFriendbot(userAddress);
+      notify.success('Wallet funded successfully!');
+      setBalance(await loadAssetBalance(userAddress, assetCode));
+    } catch (err) {
+      notify.error('Failed to fund wallet', (err as Error).message);
+    } finally {
+      setFunding(false);
+    }
+  };
+
+  const handleAddTrustline = async () => {
+    if (!userAddress || assetCode === 'XLM') return;
+    setFunding(true);
+    try {
+      await addTrustline(assetCode, userAddress);
+      notify.success(`Trustline for ${assetCode} added successfully!`);
+      setBalance(await loadAssetBalance(userAddress, assetCode));
+    } catch (err) {
+      notify.error('Failed to add trustline', (err as Error).message);
+    } finally {
+      setFunding(false);
     }
   };
 
@@ -775,8 +816,43 @@ function CreatorProfileView({ username, locale, onLocaleChange }: CreatorProfile
                   {t('walletLabel', { address: userAddress.slice(0, 8) })}
                 </p>
                 <p className="text-ink font-extrabold mt-1">
-                  {balance ?? '0.0000'} {assetCode}
+                  {isUnfunded ? 'Not funded on Testnet' : (balance ?? '0.0000')} {assetCode}
                 </p>
+                {isUnfunded && (
+                  <button
+                    onClick={handleFundWithFriendbot}
+                    disabled={funding}
+                    className="btn-brutal btn-brutal-primary w-full mt-2 text-xs py-1.5"
+                  >
+                    {funding ? 'Funding...' : 'Fund with Friendbot'}
+                  </button>
+                )}
+                {missingTrustline && !isUnfunded && assetCode !== 'XLM' && (
+                  <div className="mt-2 space-y-2">
+                    <p className="text-xs text-ink/70 font-medium">
+                      You need a {assetCode} trustline to hold or send this asset.
+                    </p>
+                    <button
+                      onClick={handleAddTrustline}
+                      disabled={funding}
+                      className="btn-brutal btn-brutal-primary w-full text-xs py-1.5"
+                    >
+                      {funding ? 'Adding...' : `Add ${assetCode} trustline`}
+                    </button>
+                    <p className="text-xs text-muted">
+                      Get test {assetCode} from{' '}
+                      <a
+                        href="https://faucet.circle.com"
+                        target="_blank"
+                        rel="noopener noreferrer"
+                        className="underline"
+                      >
+                        Circle's faucet
+                      </a>
+                      . Test tokens have no real value.
+                    </p>
+                  </div>
+                )}
               </div>
 
               {assetCodes.length > 1 && (
