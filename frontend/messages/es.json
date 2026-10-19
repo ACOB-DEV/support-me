@@ -4,6 +4,11 @@
       "title": "Creador no encontrado",
       "description": "No existe ningún perfil para <mono>@{username}</mono>."
     },
+    "loadFailed": {
+      "title": "Algo salió mal",
+      "description": "No pudimos cargar el perfil de <mono>@{username}</mono>. Puede ser un problema temporal: inténtalo de nuevo.",
+      "retry": "Reintentar"
+    },
     "share": {
       "tweetText": "¡Apoya a {name} (@{username}) en SupportMe!",
       "shareButton": "Compartir",

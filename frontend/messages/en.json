@@ -4,6 +4,11 @@
       "title": "Creator not found",
       "description": "No profile exists for <mono>@{username}</mono>."
     },
+    "loadFailed": {
+      "title": "Something went wrong",
+      "description": "We couldn't load the profile for <mono>@{username}</mono>. It may be a temporary problem — please try again.",
+      "retry": "Try again"
+    },
     "share": {
       "tweetText": "Support {name} (@{username}) on SupportMe!",
       "shareButton": "Share",

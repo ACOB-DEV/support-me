@@ -642,6 +642,97 @@ describe('CreatorProfileClient', () => {
     });
   });
 
+  describe('profile load errors', () => {
+    function mockFetchResponses(
+      responder: (url: string, init?: RequestInit) => Promise<Response> | Response
+    ) {
+      vi.stubGlobal(
+        'fetch',
+        vi.fn(async (url: string, init?: RequestInit) => responder(url, init))
+      );
+    }
+
+    const response = (status: number, body: unknown = {}) =>
+      ({ ok: status >= 200 && status < 300, status, json: async () => body }) as Response;
+
+    it('shows the not-found screen only for a 404', async () => {
+      mockFetchResponses((url) =>
+        url.includes('/api/creators/') ? response(404) : response(200, { items: [] })
+      );
+
+      await renderProfile('alice');
+
+      await waitFor(() =>
+        expect(screen.getByRole('heading', { name: /creator not found/i })).toBeInTheDocument()
+      );
+      expect(screen.queryByRole('button', { name: /try again/i })).not.toBeInTheDocument();
+    });
+
+    it('shows a retryable error instead of not-found for a 500', async () => {
+      let creatorCalls = 0;
+      mockFetchResponses((url) => {
+        if (url.includes('/api/creators/alice')) {
+          creatorCalls += 1;
+          return creatorCalls === 1
+            ? response(500)
+            : response(200, baseCreator);
+        }
+        return response(200, { items: [] });
+      });
+
+      await renderProfile('alice');
+
+      await waitFor(() =>
+        expect(screen.getByRole('alert')).toHaveTextContent(/something went wrong/i)
+      );
+      expect(screen.queryByRole('heading', { name: /creator not found/i })).not.toBeInTheDocument();
+
+      await userEvent.click(screen.getByRole('button', { name: /try again/i }));
+
+      await waitFor(() => expect(screen.getByText('Alice')).toBeInTheDocument());
+      expect(creatorCalls).toBe(2);
+    });
+
+    it('shows a retryable error, not not-found, when the request fails on the network', async () => {
+      let creatorCalls = 0;
+      mockFetchResponses((url) => {
+        if (url.includes('/api/creators/alice')) {
+          creatorCalls += 1;
+          if (creatorCalls === 1) throw new TypeError('Failed to fetch');
+        }
+        if (url.includes('/api/goals/alice')) return response(200, { items: [goal()] });
+        return response(200, baseCreator);
+      });
+
+      await renderProfile('alice');
+
+      await waitFor(() =>
+        expect(screen.getByRole('alert')).toHaveTextContent(/something went wrong/i)
+      );
+      expect(screen.queryByRole('heading', { name: /creator not found/i })).not.toBeInTheDocument();
+
+      await userEvent.click(screen.getByRole('button', { name: /try again/i }));
+
+      await waitFor(() => expect(screen.getByText('New microphone')).toBeInTheDocument());
+      expect(creatorCalls).toBe(2);
+    });
+
+    it('encodes the username in the creator request URL', async () => {
+      mockFetchResponses((url) => {
+        if (url.includes('/api/creators/')) return response(200, baseCreator);
+        return response(200, { items: [] });
+      });
+
+      await renderProfile('weird/name');
+
+      await waitFor(() => expect(screen.getByText('Alice')).toBeInTheDocument());
+      const creatorCall = vi
+        .mocked(fetch)
+        .mock.calls.find(([url]) => String(url).includes('/api/creators/'));
+      expect(String(creatorCall?.[0])).toContain('/api/creators/weird%2Fname');
+    });
+  });
+
   describe('live updates (SSE) lifecycle', () => {
     const goalsCalls = () =>
       vi.mocked(fetch).mock.calls.filter(([url]) => String(url).includes('/api/goals/alice')).length;

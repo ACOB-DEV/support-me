@@ -24,6 +24,7 @@ import {
 import { availableAssetCodes, getAsset, type AssetCode } from '@/lib/assets';
 import { getPlatform } from '@/lib/socials';
 import { API_URL } from '@/lib/api';
+import { fetchWithRetry } from '@/lib/network';
 import { describeDonationFailure, type FlowFailure } from '@/lib/failures';
 import { useAuth } from '@/context/AuthContext';
 import { Skeleton } from '@/components/Skeleton';
@@ -128,6 +129,9 @@ function CreatorProfileView({ username, locale, onLocaleChange }: CreatorProfile
   const [liveStatus, setLiveStatus] = useState<'connecting' | 'live' | 'paused'>('connecting');
   const [loading, setLoading] = useState(true);
   const [notFound, setNotFound] = useState(false);
+  // A non-404 failure (5xx, 429, dropped connection): the profile may well
+  // exist, so show a retryable error rather than "creator not found".
+  const [loadFailed, setLoadFailed] = useState(false);
 
   const [userAddress, setUserAddress] = useState<string | null>(null);
   const [balance, setBalance] = useState<string | null>(null);
@@ -202,22 +206,37 @@ function CreatorProfileView({ username, locale, onLocaleChange }: CreatorProfile
     }
   }, [username]);
 
-  useEffect(() => {
-    const fetchCreator = async () => {
-      try {
-        const res = await fetch(`${API_URL}/api/creators/${username}`);
-        if (!res.ok) throw new Error('Creator not found');
-        const data: Creator = await res.json();
-        setCreator(data);
-        await fetchGoals();
-      } catch {
+  const fetchCreator = useCallback(async () => {
+    setLoading(true);
+    setNotFound(false);
+    setLoadFailed(false);
+    try {
+      const res = await fetchWithRetry(
+        `${API_URL}/api/creators/${encodeURIComponent(username)}`
+      );
+      if (res.status === 404) {
         setNotFound(true);
-      } finally {
-        setLoading(false);
+        return;
       }
-    };
-    fetchCreator();
+      if (!res.ok) {
+        setLoadFailed(true);
+        return;
+      }
+      const data: Creator = await res.json();
+      setCreator(data);
+      await fetchGoals();
+    } catch {
+      // fetchWithRetry already surfaced the connection failure (toast +
+      // offline banner); show the retryable error state too.
+      setLoadFailed(true);
+    } finally {
+      setLoading(false);
+    }
   }, [username, fetchGoals]);
+
+  useEffect(() => {
+    fetchCreator();
+  }, [fetchCreator]);
 
   // Default the selected asset to the first one the creator accepts, once the
   // profile loads.
@@ -610,6 +629,31 @@ function CreatorProfileView({ username, locale, onLocaleChange }: CreatorProfile
             <Skeleton className="h-5 w-32 mx-auto mb-6" />
             <Skeleton className="h-10 w-full" />
           </div>
+        </div>
+      </div>
+    );
+  }
+
+  if (loadFailed) {
+    return (
+      <div className="min-h-screen bg-background flex items-center justify-center px-4">
+        <div className="card-brutal p-10 text-center max-w-md" role="alert">
+          <h1 className="text-2xl font-extrabold text-ink mb-2">
+            {tProfile('loadFailed.title')}
+          </h1>
+          <p className="text-muted font-medium mb-6">
+            {tProfile.rich('loadFailed.description', {
+              username,
+              mono: (chunks) => <span className="font-mono">{chunks}</span>,
+            })}
+          </p>
+          <button
+            type="button"
+            onClick={() => fetchCreator()}
+            className="btn-brutal btn-brutal-primary"
+          >
+            {tProfile('loadFailed.retry')}
+          </button>
         </div>
       </div>
     );
