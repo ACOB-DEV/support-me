@@ -83,9 +83,23 @@ export async function verifyMagicLink(rawToken: string): Promise<MagicLinkSessio
   // concurrent double-submit of the same link (e.g. an email client
   // prefetching the URL) can't both succeed and issue two sessions for
   // what should be a single-use token.
+  //
+  // This must be a single conditional WRITE, not a read-then-write: under
+  // Postgres' default READ COMMITTED isolation, two concurrent
+  // transactions can both read `usedAt = null` via findUnique() before
+  // either commits its update, so a plain "check then update" (as this
+  // used to do) does not actually prevent the race its own comment
+  // claimed to. `updateMany` with `usedAt: null` in the WHERE clause
+  // consumes the token atomically: Postgres' row-level locking ensures at
+  // most one of two concurrent UPDATE statements matching the same row
+  // reports count > 0, so only one of two racing requests can ever reach
+  // the user upsert below.
   const user = await prisma.$transaction(async (tx) => {
-    const fresh = await tx.magicLinkToken.findUnique({ where: { tokenHash } });
-    if (!fresh || fresh.usedAt) {
+    const consumed = await tx.magicLinkToken.updateMany({
+      where: { tokenHash, usedAt: null, expiresAt: { gt: new Date() } },
+      data: { usedAt: new Date() },
+    });
+    if (consumed.count === 0) {
       throw new UnauthorizedError("This magic link has already been used");
     }
 
@@ -97,7 +111,7 @@ export async function verifyMagicLink(rawToken: string): Promise<MagicLinkSessio
 
     await tx.magicLinkToken.update({
       where: { tokenHash },
-      data: { usedAt: new Date(), userId: account.id },
+      data: { userId: account.id },
     });
 
     return account;

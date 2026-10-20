@@ -158,6 +158,26 @@ describe("completeTwitterAuth (#14)", () => {
     expect(session.username).toBe("bob");
   });
 
+  it("refuses to sign in a returning user whose account has been soft-deleted (#270)", async () => {
+    const authorizeUrl = new URL(startTwitterAuth());
+    const state = authorizeUrl.searchParams.get("state")!;
+
+    mockedExchange.mockResolvedValue({ accessToken: "new-at" });
+    mockedFetchProfile.mockResolvedValue({ id: "twitter-id-3", username: "deleted", name: "Deleted" });
+    // Account deletion never removes the OAuthIdentity row, so this lookup
+    // still matches the deleted user.
+    mockedPrisma.oAuthIdentity.findUnique.mockResolvedValue({
+      id: 6,
+      provider: "twitter",
+      providerAccountId: "twitter-id-3",
+      userId: 8,
+      user: { id: 8, walletAddress: null, email: null, deletedAt: new Date() },
+    });
+
+    await expect(completeTwitterAuth("auth-code", state)).rejects.toMatchObject({ statusCode: 401 });
+    expect(mockedPrisma.oAuthIdentity.update).not.toHaveBeenCalled();
+  });
+
   it("looks up the OAuth identity by the exact (provider, providerAccountId) compound key", async () => {
     const authorizeUrl = new URL(startTwitterAuth());
     const state = authorizeUrl.searchParams.get("state")!;

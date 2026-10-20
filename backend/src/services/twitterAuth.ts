@@ -104,6 +104,14 @@ async function linkTwitterIdentity(
   });
 
   if (existing) {
+    // Account deletion never removes the OAuthIdentity row linking this
+    // Twitter profile to its user, so without this check a deleted
+    // account's Twitter sign-in would keep returning the same deleted
+    // user and minting it a fresh token indefinitely (#270). Refuse
+    // rather than silently reviving the account.
+    if (existing.user.deletedAt) {
+      throw new UnauthorizedError("This account no longer exists");
+    }
     await prisma.oAuthIdentity.update({
       where: { id: existing.id },
       data: { accessToken, refreshToken },

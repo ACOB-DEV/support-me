@@ -4,6 +4,7 @@ jest.mock("../../prisma", () => ({
     user: {
       count: jest.fn(),
       findMany: jest.fn(),
+      findUnique: jest.fn(),
     },
     creator: {
       count: jest.fn(),
@@ -29,7 +30,7 @@ import prisma from "../../prisma";
 import { generateToken } from "../../middleware/auth";
 
 const mockedPrisma = prisma as unknown as {
-  user: { count: jest.Mock; findMany: jest.Mock };
+  user: { count: jest.Mock; findMany: jest.Mock; findUnique: jest.Mock };
   creator: { count: jest.Mock };
   donation: { groupBy: jest.Mock };
   subscription: { count: jest.Mock; findMany: jest.Mock };
@@ -45,6 +46,7 @@ describe("GET /api/admin/overview", () => {
   beforeEach(() => {
     jest.clearAllMocks();
     process.env.ADMIN_WALLETS = ADMIN_WALLET;
+    mockedPrisma.user.findUnique.mockResolvedValue({ deletedAt: null });
     mockedPrisma.adminAuditLog.create.mockResolvedValue({ id: 1 });
     mockedPrisma.adminAuditLog.findMany.mockResolvedValue([]);
     mockedPrisma.adminAuditLog.count.mockResolvedValue(0);
@@ -192,6 +194,7 @@ describe("GET /api/admin/audit-logs", () => {
   beforeEach(() => {
     jest.clearAllMocks();
     process.env.ADMIN_WALLETS = ADMIN_WALLET;
+    mockedPrisma.user.findUnique.mockResolvedValue({ deletedAt: null });
     mockedPrisma.adminAuditLog.findMany.mockResolvedValue([
       { id: 9, adminWalletAddress: ADMIN_WALLET, action: "admin.overview.viewed" },
     ]);

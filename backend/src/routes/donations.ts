@@ -20,14 +20,18 @@ const rateLimits = getRateLimitConfig();
 
 // Donation creation does at least one database query per request, so it is
 // limited per IP and per sender wallet before any of that work happens.
+//
+// Each limiter self-sweeps idle keys (#271); see routes/auth.ts for why.
 export const donationIpLimiter = new RateLimiter(
   rateLimits.donation.ipMax,
   rateLimits.donation.windowMs
 );
+donationIpLimiter.startSweeping();
 export const donationSenderLimiter = new RateLimiter(
   rateLimits.donation.accountMax,
   rateLimits.donation.windowMs
 );
+donationSenderLimiter.startSweeping();
 
 router.get(
   "/",
