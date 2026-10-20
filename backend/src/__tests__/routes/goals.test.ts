@@ -1,6 +1,7 @@
 jest.mock("../../prisma", () => ({
   __esModule: true,
   default: {
+    user: { findUnique: jest.fn().mockResolvedValue({ deletedAt: null }) },
     creator: {
       findUnique: jest.fn(),
     },

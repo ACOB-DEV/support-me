@@ -56,12 +56,26 @@ jest.mock("../../prisma", () => {
   };
   const prismaMock = {
     ...transactionClient,
+    // #268 — the persisted event-listener cursor, stored in the same
+    // generic key/value table #278's reset detector already uses.
+    networkCheckpoint: {
+      findUnique: jest.fn().mockResolvedValue(null),
+      upsert: jest.fn().mockResolvedValue({}),
+      deleteMany: jest.fn().mockResolvedValue({ count: 0 }),
+    },
     $transaction: jest.fn((callback: (client: typeof transactionClient) => unknown) =>
       callback(transactionClient)
     ),
   };
   return { __esModule: true, default: prismaMock };
 });
+
+jest.mock("../../services/networkReset", () => ({
+  networkReset: {
+    getState: jest.fn().mockReturnValue({ status: "ok" }),
+    check: jest.fn().mockResolvedValue(false),
+  },
+}));
 
 function toBase64Xdr(val: unknown): string {
   return nativeToScVal(val).toXDR("base64");
@@ -76,6 +90,7 @@ const mockedPrisma = prisma as unknown as {
     create: jest.Mock;
   };
   goal: { findMany: jest.Mock; update: jest.Mock };
+  networkCheckpoint: { findUnique: jest.Mock; upsert: jest.Mock; deleteMany: jest.Mock };
 };
 const mockedNotifyReceived = notifyDonationReceived as jest.Mock;
 const mockedNotifyConfirmation = notifyDonationConfirmation as jest.Mock;
