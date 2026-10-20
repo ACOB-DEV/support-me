@@ -149,7 +149,7 @@ router.get(
 router.post(
   "/network-resync",
   asyncHandler(async (req: AuthRequest, res) => {
-    sorobanEventListener.resetCursor();
+    await sorobanEventListener.resetCursor();
 
     const deactivated = await prisma.subscription.updateMany({
       where: { active: true },

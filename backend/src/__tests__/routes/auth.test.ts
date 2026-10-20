@@ -127,6 +127,32 @@ describe("POST /api/auth/verify", () => {
     expect(res.body.user).toEqual({ id: 1, walletAddress: keypair.publicKey() });
     expect(res.body.hasProfile).toBe(false);
   });
+
+  it("refuses to sign in a wallet that belongs to a soft-deleted account (#270)", async () => {
+    const keypair = Keypair.random();
+
+    const challengeRes = await request(app)
+      .post("/api/auth/challenge")
+      .send({ walletAddress: keypair.publicKey() });
+    const { message } = challengeRes.body;
+    const signedMessage = signChallenge(keypair, message);
+
+    // walletAddress survives a soft delete (only email is cleared), so the
+    // upsert still matches the same row and returns it with deletedAt set.
+    mockedPrisma.user.upsert.mockResolvedValue({
+      id: 1,
+      walletAddress: keypair.publicKey(),
+      deletedAt: new Date(),
+    });
+
+    const res = await request(app).post("/api/auth/verify").send({
+      walletAddress: keypair.publicKey(),
+      signedMessage,
+    });
+
+    expect(res.status).toBe(401);
+    expect(mockedPrisma.creator.findUnique).not.toHaveBeenCalled();
+  });
 });
 
 describe("POST /api/auth/magic-link (#15)", () => {

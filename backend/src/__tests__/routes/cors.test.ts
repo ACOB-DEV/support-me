@@ -2,6 +2,7 @@ jest.mock("../../prisma", () => ({
   __esModule: true,
   default: {
     subscription: { findMany: jest.fn().mockResolvedValue([]) },
+    user: { findUnique: jest.fn().mockResolvedValue({ deletedAt: null }) },
   },
 }));
 

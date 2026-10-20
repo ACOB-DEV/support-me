@@ -18,6 +18,7 @@ import { errorHandler } from "./middleware/errorHandler";
 import { requestLogger } from "./middleware/requestLogger";
 import { checkSorobanRpc } from "./services/sorobanHealth";
 import { executorHealth } from "./services/executorHealth";
+import { eventListenerHealth } from "./services/eventListenerHealth";
 import { networkReset } from "./services/networkReset";
 import { getAllowedOrigins } from "./config";
 
@@ -89,24 +90,32 @@ app.use("/", seoRouter);
 app.get("/health", async (req, res) => {
   const sorobanRpc = await checkSorobanRpc();
   const subscriptionExecutor = executorHealth.getHealth();
+  const eventListener = eventListenerHealth.getHealth();
   const network = networkReset.getState();
   // A detected testnet reset is the most severe state: the backend is running
   // against a chain that no longer matches its configuration, so report
   // unhealthy regardless of the other dependencies (#278). The runbook is in
   // docs/testnet-troubleshooting.md.
+  //
+  // A cursor-recovery gap (#268) is reported as "degraded" rather than
+  // "unhealthy": it means a past window of events was permanently missed,
+  // which an operator should see and investigate, but the listener itself
+  // has already recovered and is polling normally again.
   const status =
     network.status === "reset_detected"
       ? "unhealthy"
       : subscriptionExecutor.status === "unhealthy"
         ? "unhealthy"
-        : sorobanRpc.status === "ok"
-          ? "ok"
-          : "degraded";
+        : sorobanRpc.status !== "ok"
+          ? "degraded"
+          : eventListener.gapDetected
+            ? "degraded"
+            : "ok";
   return res.json({
     status,
     timestamp: new Date().toISOString(),
     network: network.status,
-    dependencies: { sorobanRpc, subscriptionExecutor, network },
+    dependencies: { sorobanRpc, subscriptionExecutor, eventListener, network },
   });
 });
 

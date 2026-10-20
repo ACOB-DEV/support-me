@@ -2,6 +2,7 @@ import { xdr, scValToNative } from "@stellar/stellar-sdk";
 import { Prisma } from "@prisma/client";
 import prisma from "../prisma";
 import { networkReset } from "./networkReset";
+import { eventListenerHealth } from "./eventListenerHealth";
 import * as Sentry from "@sentry/node";
 import {
   DONATION_EVENT,
@@ -37,6 +38,26 @@ const POLL_INTERVAL_MS = Number(process.env.SOROBAN_EVENTS_POLL_INTERVAL_MS) || 
 // freshly-restarted backend still surfaces recent events instead of only
 // ones that happen after this exact moment.
 const LOOKBACK_LEDGERS = Number(process.env.SOROBAN_EVENTS_LOOKBACK_LEDGERS) || 100;
+// Soroban RPC getEvents returns at most this many events per call; paging
+// within one tick until fewer than this many come back is what lets a
+// backlog (e.g. after a restart, or a retention-window recovery) drain in
+// one poll instead of trickling in one page every POLL_INTERVAL_MS (#268).
+const EVENTS_PAGE_LIMIT = 50;
+// Upper bound on pages drained in a single poll tick, so a pathological
+// backlog cannot monopolize the event loop forever; the next tick resumes
+// from wherever this one left off.
+const MAX_PAGES_PER_TICK = 20;
+
+/** DB row key (NetworkCheckpoint, the same table #278's reset detector uses) for the persisted cursor. */
+export const EVENT_CURSOR_KEY = "soroban:eventListener:cursor";
+
+/** Error messages Soroban RPC nodes use for a start position outside their retention window. */
+function isOutOfRetentionError(error: unknown): boolean {
+  const message = error instanceof Error ? error.message : String(error);
+  return /before\s+(the\s+)?oldest|outside.*retention|retention\s+window|start\s+is\s+too\s+old/i.test(
+    message
+  );
+}
 
 export interface RawEvent {
   type: string;
@@ -73,7 +94,12 @@ async function rpcCall<T>(method: string, params: Record<string, unknown>): Prom
  * updating creator goals) without requiring constant polling of contract RPCs.
  */
 export class SorobanEventListener {
-  private cursor: string | null = null;
+  // `undefined` means "not yet loaded from the DB this process" — distinct
+  // from `null`, "loaded, and there genuinely is none yet" (#268). Without
+  // that distinction the first poll after a restart cannot tell those two
+  // cases apart and would always fall back to the lookback window, which is
+  // exactly the bug this issue reports.
+  private cursor: string | null | undefined = undefined;
   private timer: ReturnType<typeof setInterval> | null = null;
   private polling = false;
 
@@ -109,8 +135,34 @@ export class SorobanEventListener {
    * from the current chain head. Used by the post-reset resync (#278): the old
    * cursor points into a ledger sequence that no longer exists.
    */
-  resetCursor(): void {
+  async resetCursor(): Promise<void> {
     this.cursor = null;
+    await this.clearStoredCursor();
+    eventListenerHealth.setCursor(null);
+    // A fresh chain after resync invalidates any prior out-of-retention gap
+    // report too — it referred to the old (now-gone) chain's history.
+    eventListenerHealth.clearGap();
+  }
+
+  /** Reads the persisted cursor (NetworkCheckpoint), or null if none is stored. */
+  private async loadStoredCursor(): Promise<string | null> {
+    const row = await prisma.networkCheckpoint.findUnique({
+      where: { key: EVENT_CURSOR_KEY },
+    });
+    return row?.value ?? null;
+  }
+
+  private async saveCursor(cursor: string): Promise<void> {
+    await prisma.networkCheckpoint.upsert({
+      where: { key: EVENT_CURSOR_KEY },
+      update: { value: cursor },
+      create: { key: EVENT_CURSOR_KEY, value: cursor },
+    });
+    eventListenerHealth.setCursor(cursor);
+  }
+
+  private async clearStoredCursor(): Promise<void> {
+    await prisma.networkCheckpoint.deleteMany({ where: { key: EVENT_CURSOR_KEY } });
   }
 
   /**
@@ -410,6 +462,73 @@ export class SorobanEventListener {
     }
   }
 
+  private buildEventsParams(): Record<string, unknown> {
+    const contractIds = [DONATION_CONTRACT_ID!];
+    if (CREATOR_REGISTRY_CONTRACT_ID) {
+      contractIds.push(CREATOR_REGISTRY_CONTRACT_ID);
+    }
+    return {
+      filters: [{ type: "contract", contractIds }],
+      pagination: { limit: EVENTS_PAGE_LIMIT },
+    };
+  }
+
+  /**
+   * Fetches one page starting from the current ledger lookback (used only
+   * when there is no cursor at all — first-ever start, or right after a
+   * resync). Separate from the cursor-based call below because this one
+   * always derives a fresh `startLedger` and never supplies a cursor.
+   */
+  private async pollFromLookback(): Promise<{ events: RawEvent[] }> {
+    const { sequence: latestLedger } = await rpcCall<{ sequence: number }>(
+      "getLatestLedger",
+      {}
+    );
+    const params = this.buildEventsParams();
+    params.startLedger = Math.max(latestLedger - LOOKBACK_LEDGERS, 1);
+    return rpcCall<{ events: RawEvent[] }>("getEvents", params);
+  }
+
+  /**
+   * Restarts from the oldest ledger the RPC node still retains, after the
+   * stored cursor was rejected as outside its retention window (#268). The
+   * gap between the old cursor and this ledger is permanently lost — those
+   * events can never be fetched from this (or any public) RPC node again —
+   * so this records it on eventListenerHealth rather than pretending
+   * nothing happened.
+   */
+  private async recoverFromOutOfRetention(): Promise<{ events: RawEvent[] }> {
+    const { oldestLedger } = await rpcCall<{ oldestLedger: number }>("getHealth", {});
+    console.warn(
+      `SorobanEventListener: stored cursor is outside the RPC's retention window; ` +
+        `restarting from the oldest retained ledger ${oldestLedger}. Events between the ` +
+        `old cursor and this ledger were missed and cannot be recovered.`
+    );
+    eventListenerHealth.recordGap(oldestLedger);
+    Sentry.captureMessage(
+      `SorobanEventListener: cursor outside retention window, recovered from ledger ${oldestLedger}`,
+      "warning"
+    );
+
+    const params = this.buildEventsParams();
+    params.startLedger = oldestLedger;
+    return rpcCall<{ events: RawEvent[] }>("getEvents", params);
+  }
+
+  private async fetchNextPage(): Promise<{ events: RawEvent[] }> {
+    if (this.cursor) {
+      const params = this.buildEventsParams();
+      (params.pagination as Record<string, unknown>).cursor = this.cursor;
+      try {
+        return await rpcCall<{ events: RawEvent[] }>("getEvents", params);
+      } catch (error) {
+        if (!isOutOfRetentionError(error)) throw error;
+        return this.recoverFromOutOfRetention();
+      }
+    }
+    return this.pollFromLookback();
+  }
+
   private async poll(): Promise<void> {
     if (this.polling) return;
     // #278: once a reset is detected the listener is stopped, but a poll in
@@ -423,34 +542,31 @@ export class SorobanEventListener {
       // interval". check() is cheap and short-circuits once detected.
       if (await networkReset.check()) return;
 
-      const contractIds = [DONATION_CONTRACT_ID!];
-      if (CREATOR_REGISTRY_CONTRACT_ID) {
-        contractIds.push(CREATOR_REGISTRY_CONTRACT_ID);
+      // Resume from the DB-persisted cursor (#268): `undefined` means this
+      // process has not loaded it yet (fresh start or restart); `null` means
+      // it was loaded and there genuinely is none, so the lookback below is
+      // the correct fallback rather than a sign something went missing.
+      if (this.cursor === undefined) {
+        this.cursor = await this.loadStoredCursor();
+        eventListenerHealth.setCursor(this.cursor);
       }
 
-      const params: Record<string, unknown> = {
-        filters: [{ type: "contract", contractIds }],
-        pagination: { limit: 50 },
-      };
+      // Drain within this tick while the RPC keeps returning a full page, so
+      // a backlog (after a restart, or a retention-window recovery) catches
+      // up in one poll instead of trickling in one page every interval.
+      for (let page = 0; page < MAX_PAGES_PER_TICK; page++) {
+        const result = await this.fetchNextPage();
 
-      if (this.cursor) {
-        (params.pagination as Record<string, unknown>).cursor = this.cursor;
-      } else {
-        const { sequence: latestLedger } = await rpcCall<{ sequence: number }>(
-          "getLatestLedger",
-          {}
-        );
-        params.startLedger = Math.max(latestLedger - LOOKBACK_LEDGERS, 1);
-      }
+        for (const evt of result.events) {
+          await this.processEvent(evt);
+        }
 
-      const result = await rpcCall<{ events: RawEvent[] }>("getEvents", params);
+        if (result.events.length > 0) {
+          this.cursor = result.events[result.events.length - 1].id;
+          await this.saveCursor(this.cursor);
+        }
 
-      for (const evt of result.events) {
-        await this.processEvent(evt);
-      }
-
-      if (result.events.length > 0) {
-        this.cursor = result.events[result.events.length - 1].id;
+        if (result.events.length < EVENTS_PAGE_LIMIT) break;
       }
     } catch (error) {
       console.error("SorobanEventListener: poll failed:", (error as Error).message);
